@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>洗衣管家 · 会员数据导出工具 — 使用说明</title>
+<style>
+  :root { --blue:#3B6FD4; --dark:#1F2A44; --gray:#5B6B85; --line:#DCE4F2; --bg:#F4F6FB; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--dark);
+         font-family:"Microsoft YaHei","微软雅黑",-apple-system,"Segoe UI",sans-serif; line-height:1.75; }
+  .page { max-width:900px; margin:0 auto; padding:28px 20px 60px; }
+  header { background:linear-gradient(135deg,#2B54A8,#3B6FD4 55%,#5E8BE8); color:#fff;
+           border-radius:18px; padding:30px 34px; box-shadow:0 10px 26px rgba(43,84,168,.20); }
+  header h1 { margin:0 0 8px; font-size:26px; }
+  header .sub { margin:0; opacity:.92; }
+  .badge { display:inline-block; margin-top:14px; background:rgba(255,255,255,.18); border:1px solid rgba(255,255,255,.35);
+           border-radius:999px; padding:3px 12px; font-size:13px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:16px; padding:22px 26px; margin-top:18px;
+          box-shadow:0 4px 14px rgba(31,42,68,.05); }
+  .card h2 { margin:0 0 14px; font-size:19px; color:var(--blue); }
+  .card img { width:100%; border-radius:12px; border:1px solid var(--line); }
+  ol.steps { margin:0; padding-left:22px; }
+  ol.steps li { margin:6px 0; }
+  code { background:#EEF3FC; color:#2B54A8; border-radius:6px; padding:1px 7px; font-size:.92em;
+         font-family:Consolas,"Courier New",monospace; }
+  table { width:100%; border-collapse:collapse; font-size:14.5px; }
+  th, td { border:1px solid var(--line); padding:8px 12px; text-align:left; vertical-align:top; }
+  th { background:#EEF3FC; color:#2B54A8; font-weight:600; }
+  tr:nth-child(even) td { background:#FAFBFE; }
+  details { border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin:8px 0; background:#FBFCFE; }
+  details summary { cursor:pointer; font-weight:600; color:var(--dark); }
+  details p { margin:8px 0 2px; color:var(--gray); }
+  .warning { border-color:#F2D9A6; background:#FFFBF2; }
+  .warning h2 { color:#B7791F; }
+  footer { text-align:center; color:#8B99B3; font-size:13px; margin-top:26px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <h1>洗衣管家 · 会员数据导出工具</h1>
+    <p class="sub">把会员数据一键导出为 Excel：常规表 / 全量字段 / 完整详情</p>
+    <span class="badge">v1.2 · 2026-09-22 · 洗衣管家 6.1.23 实测通过</span>
+  </header>
+
+  <section class="card">
+    <h2>一图看懂</h2>
+    <img src="导出流程图.png" alt="工具工作原理与流程">
+  </section>
+
+  <section class="card">
+    <h2>两个使用入口</h2>
+    <table>
+      <tr><th>入口</th><th>用时</th><th>导出内容</th></tr>
+      <tr><td><code>导出会员数据.cmd</code>（日常推荐）</td><td>几秒钟</td><td>常规表（9 列）+ <strong>全量字段表</strong>（会员档案全部字段，62 列）</td></tr>
+      <tr><td><code>导出会员数据(含详情).cmd</code>（完整版）</td><td>几分钟</td><td>上面全部 + 逐会员<strong>详情</strong>：标签、充值/赠送余额、卡券、<strong>订单明细</strong>、最近充值信息；支持断点续传</td></tr>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>快速开始</h2>
+    <ol class="steps">
+      <li>确认「<strong>洗衣管家</strong>」已经打开并登录（正常营业状态即可）。</li>
+      <li>双击运行对应入口（日常用第一个；要完整数据用第二个）。</li>
+      <li>看到完成提示后，会自动打开 <code>导出结果</code> 文件夹。</li>
+      <li>打开最新的 Excel 文件即可查看、编辑、打印。</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>浏览与查询（会员数据查询台）</h2>
+    <ol class="steps">
+      <li>完成任意一次导出后，双击 <code>打开会员查询页面.cmd</code>。</li>
+      <li>脚本会自动生成最新数据，并在浏览器中打开查询页面（离线可用，无需联网）。</li>
+    </ol>
+    <p style="margin:8px 0 0;color:#5B6B85">支持：搜索（姓名 / 电话 / 拼音 / 卡号 / 订单号）、筛选（级别 / 来源 / 状态 / 余额）、排序、点击查看完整详情（订单明细、卡券、全部字段）、一键复制电话、导出筛选结果为 CSV。每次导出后页面数据会自动刷新。</p>
+  </section>
+
+  <section class="card">
+    <h2>输出文件</h2>
+    <table>
+      <tr><th>文件</th><th>用途</th></tr>
+      <tr><td><code>会员导出_xxx.xlsx</code></td><td>常规表：联系人 / 电话 / 级别 / 余额 等 9 列，<strong>日常推荐</strong></td></tr>
+      <tr><td><code>会员全量数据_xxx.xlsx</code></td><td>全量字段表：会员档案全部字段（62 列；金额字段单位为“分”）</td></tr>
+      <tr><td><code>会员详情_xxx.xlsx</code></td><td>（含详情模式）详情总表 + 订单明细 + 卡券明细</td></tr>
+      <tr><td><code>会员导出_xxx.csv</code>、<code>会员全量数据_xxx.csv</code></td><td>通用表格（Excel / WPS 直接打开）</td></tr>
+      <tr><td><code>会员导出_xxx.json</code>、<code>会员详情_xxx.json</code></td><td>原始数据（程序用 / 备份）</td></tr>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>常规表列说明（9 列）</h2>
+    <table>
+      <tr><th>列名</th><th>说明</th></tr>
+      <tr><td>联系人</td><td>会员姓名（部分会员未登记姓名时为空）</td></tr>
+      <tr><td>电话</td><td>手机号（固定文本格式，不会变成科学计数法）</td></tr>
+      <tr><td>会员级别</td><td>如：VIP会员 / 全价会员 / 代收点</td></tr>
+      <tr><td>账户余额(元)</td><td>当前账户余额，单位：元</td></tr>
+      <tr><td>会员卡号</td><td>有实体卡时显示卡号；空 = 未办卡</td></tr>
+      <tr><td>订单数</td><td>历史订单笔数</td></tr>
+      <tr><td>注册时间</td><td>会员注册时间</td></tr>
+      <tr><td>来源</td><td>微信公众号 / 店内 等</td></tr>
+      <tr><td>状态</td><td>正常 / 禁用</td></tr>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>常见问题</h2>
+    <details>
+      <summary>查询页面（会员数据查询台）怎么打开？</summary>
+      <p>双击 <code>打开会员查询页面.cmd</code> 即可（会先刷新数据再打开）。若浏览器未自动弹出，可手动打开 <code>查询页面\index.html</code>。</p>
+    </details>
+    <details>
+      <summary>提示“无法连接洗衣管家调试端口”怎么办？</summary>
+      <p>先确认洗衣管家正在运行且已登录。若反复出现：完全退出洗衣管家，双击运行
+      <code>以调试模式启动洗衣管家.cmd</code> 重新打开软件，然后再导出。</p>
+    </details>
+    <details>
+      <summary>“全量字段”和“会员详情”是什么区别？</summary>
+      <p>全量字段 = 会员档案里的全部字段（62 列，一次性读取，很快）；会员详情 = 每个会员的动态资料（标签、卡券、订单明细、充值记录），需要逐会员抓取，由“含详情”入口生成。</p>
+    </details>
+    <details>
+      <summary>全量字段里的金额为什么是“分”？</summary>
+      <p>为保持原始数据不失真，全量表按系统存储单位（分）导出；常规表的余额已换算成“元”。</p>
+    </details>
+    <details>
+      <summary>含详情模式中途断了怎么办？</summary>
+      <p>重新运行同一个入口即可：会自动跳过已抓取成功的会员、继续补抓（断点续传）。</p>
+    </details>
+    <details>
+      <summary>数据是最新的吗？会不会影响洗衣管家使用？</summary>
+      <p>每次运行都实时读取当下数据，并显示“会员总数 / 余额合计”供与软件内外对照。工具只读取数据：不修改内容、不影响收衣开单和打印流程。</p>
+    </details>
+  </section>
+
+  <section class="card warning">
+    <h2>⚠ 安全提示</h2>
+    <p style="color:#7A5B1E;margin:0">导出文件包含<strong>客户姓名、电话、地址等个人信息</strong>，请妥善保管，不要随意外发。工具全程在本机运行，不向网络上传任何数据。</p>
+  </section>
+
+  <footer>文件位置：E:\软件开发\洗衣管家会员导出\　·　输出目录：导出结果\</footer>
+
+</div>
+</body>
+</html>
