@@ -6,7 +6,7 @@
  *   1) 常规导出：联系人/电话/级别/余额等 9 列汇总（csv/json/xlsx）
  *   2) 全量字段：会员列表接口返回的【全部字段】（csv/xlsx，含在 json 里）
  *   3) 深度详情（--deep）：逐会员抓取详情（标签、券、卡、订单、充值等），
- *      支持断点续传；低速安全速率，约 15~25 分钟
+ *      支持断点续传；低速安全速率；失败自动等待 180 秒重试，约 15~30 分钟
  *
  * 原理：洗衣管家是内嵌浏览器(CefSharp)的桌面程序，运行在 127.0.0.1:9222
  *       调试端口上。本工具在该端口内调用软件自身的接口读取数据。
@@ -63,6 +63,17 @@ if (!DEEP_LIMIT && process.env.LAUNDRY_DEEP_LIMIT) {
 
 /* ---------------- 小工具 ---------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* 失败时的长等待：等待指定秒数后再继续（等待期间每 60 秒提示一次，便于确认程序在运行） */
+async function waitLong(seconds, reason) {
+  log(`      [提示] ${reason}；等待 ${seconds} 秒后自动继续...`);
+  const step = 60;
+  for (let waited = 0; waited < seconds; waited += step) {
+    await sleep(Math.min(step, seconds - waited) * 1000);
+    const total = waited + step;
+    if (total < seconds) log(`        已等待 ${total} 秒 / ${seconds} 秒 ...`);
+  }
+}
 let cdp = null;
 
 function log(...args) { console.log(...args); }
@@ -238,7 +249,7 @@ function deepExpr(uids) {
 
 async function fetchPageWithRetry(start, size) {
   let lastErr;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 5; attempt++) {
     try {
       const raw = await cdp.evaluate(pageExpr(start, size), 40000);
       if (typeof raw !== 'string') throw new Error('页面返回内容异常');
@@ -248,13 +259,16 @@ async function fetchPageWithRetry(start, size) {
       return res;
     } catch (e) {
       lastErr = e;
-      if (attempt < 3) {
-        log(`    取数失败（${e.message}），${attempt}/3，重试中...`);
-        await sleep(1000 * attempt);
+      if (attempt >= 5) break;
+      if (attempt <= 2) {
+        log(`    取数失败（${e.message}），${attempt}/5，快速重试中...`);
+        await sleep(1500 * attempt);
+      } else {
+        await waitLong(180, `第 ${attempt} 次取数失败（${e.message}）`);
       }
     }
   }
-  die('连续 3 次获取数据失败：' + (lastErr && lastErr.message));
+  die('连续多次获取数据失败：' + (lastErr && lastErr.message));
 }
 
 /* 深度详情批次：整批失败时二分拆小重试一次，尽量隔离个别卡住的会员 */
@@ -466,7 +480,8 @@ async function main() {
     const errors = [];
     let done = deepTargets.length - remaining.length;
     let pace = 1500;
-    let consecutiveFail = 0;
+    let lastOkAt = Date.now();
+    let stopAll = false;
     for (let i = 0; i < remaining.length; i += BATCH) {
       /* 登录状态自检：若被软件登出立即停止（避免无效重试） */
       try {
@@ -478,33 +493,50 @@ async function main() {
           break;
         }
       } catch (e) { /* 自检失败不阻断，继续 */ }
-      const batch = remaining.slice(i, i + BATCH);
-      const uids = batch.map((m) => m.uid);
-      const results = await fetchDetailBatch(uids);
-      let batchErrors = 0;
-      const appends = [];
-      for (const item of results) {
-        if (item && item.detail) {
-          appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
-          done++;
-        } else {
-          errors.push({ uid: item && item.uid, error: (item && item.error) || '未知' });
-          batchErrors++;
+
+      let batch = remaining.slice(i, i + BATCH);
+      let attempt = 0;
+      for (;;) {
+        attempt++;
+        const results = await fetchDetailBatch(batch.map((m) => m.uid));
+        const appends = [];
+        const failed = [];
+        for (const item of results) {
+          if (item && item.detail) {
+            appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
+            done++;
+          } else {
+            failed.push(item && item.uid != null ? item.uid : null);
+          }
         }
+        if (appends.length) {
+          fs.appendFileSync(jsonlPath, appends.join('\n') + '\n', 'utf8');
+          lastOkAt = Date.now();
+        }
+        if (failed.length === 0) { pace = Math.max(1200, pace - 100); break; }
+        if (attempt >= 4) {
+          for (const u of failed) errors.push({ uid: u, error: '多次重试失败' });
+          log(`      （${failed.length} 个会员多次重试仍失败，已跳过；稍后可整体重跑补抓）`);
+          break;
+        }
+        await waitLong(180, `本批有 ${failed.length} 个会员取数失败（第 ${attempt} 次）`);
+        batch = batch.filter((m) => failed.indexOf(m.uid) >= 0);
+        if (!batch.length) break;
+        /* 长等待后再自检一次登录状态 */
+        try {
+          const ok2 = await cdp.evaluate('(function(){ try { return !!((localStorage.getItem("code")||"").length); } catch(e){ return true; } })()', 5000);
+          if (ok2 === false) {
+            log('      [重要] 等待期间检测到登录状态已失效，请重新登录后重跑（已抓取的数据均已保存）。');
+            stopAll = true;
+            break;
+          }
+        } catch (e) { /* ignore */ }
       }
-      if (appends.length) fs.appendFileSync(jsonlPath, appends.join('\n') + '\n', 'utf8');
-      if (batchErrors > 0) {
-        consecutiveFail = batchErrors >= batch.length ? consecutiveFail + 1 : 0;
-        pace = Math.min(Math.round(pace * 1.5) + 500, 6000);
-      } else {
-        consecutiveFail = 0;
-        pace = Math.max(1200, pace - 100);
-      }
-      log(`      详情进度 ${done} / ${deepTargets.length}${errors.length ? `（失败 ${errors.length}）` : ''}`);
-      if (consecutiveFail >= 3) {
+      if (stopAll) break;
+      log(`      详情进度 ${done} / ${deepTargets.length}${errors.length ? `（跳过 ${errors.length}）` : ''}`);
+      if (Date.now() - lastOkAt > 30 * 60 * 1000) {
         log('');
-        log('      [提示] 连续多批数据取回失败（可能是网络、服务端限制或登录状态变化）。');
-        log('      已抓取的数据均已保存；请稍后（建议 10 分钟以上）重新运行本命令，将自动从中断处续传。');
+        log('      [提示] 已连续 30 分钟没有成功取回数据，自动停止（数据已保存，稍后可重跑续传）。');
         break;
       }
       await sleep(pace);
