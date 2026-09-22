@@ -31,6 +31,9 @@ FALLBACK_LABELS = {
     "tagname": "标签名称", "chargeno": "最近充值单号", "chargeshop": "最近充值门店",
     "chargetime": "最近充值时间", "chargermb": "最近充值金额·分", "edate": "到期日期",
     "hcard": "充值卡", "vipcard": "VIP卡", "ticket": "优惠券", "order": "订单明细", "plusnot": "PLUS明细",
+    "sdate": "起始日期", "cardid": "卡ID", "ticketid": "券ID", "tid": "券模板ID", "cloth_name": "适用衣物",
+    "times": "总次数", "utimes": "已用次数", "canuse": "可用范围", "overdue": "是否过期", "expired": "是否失效",
+    "torderid": "关联订单", "taskid": "活动ID", "limitrmb": "门槛·分", "prmb": "原价·分", "trmb": "累计金额·分",
 }
 
 

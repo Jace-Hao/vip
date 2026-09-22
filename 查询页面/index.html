@@ -77,6 +77,11 @@
   .minichips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 2px}
   .minichip{background:#F5F8FD;border:1px solid var(--line);border-radius:8px;padding:4px 9px;font-size:12.5px;color:#42536F}
   .minichip b{color:var(--ink)}
+  .voucher{background:#FAFCFE;border:1px solid #E6EDF8;border-radius:10px;padding:9px 11px;margin:6px 0}
+  .v-title{font-weight:600;font-size:13.5px;color:var(--ink)}
+  .v-sub{color:#66738A;font-size:12px;margin-top:1px}
+  .v-dates{color:#66738A;font-size:12.5px;margin:3px 0 5px}
+  .v-dates b{color:#42536F}
   .ordtable{width:100%;font-size:12.5px}
   .ordtable th{position:static;background:#F7FAFF;padding:6px 8px;border-bottom:1px solid var(--line);color:#42536F;font-weight:600;white-space:nowrap}
   .ordtable td{padding:6px 8px;border-bottom:1px solid #F1F5FB;white-space:nowrap}
@@ -225,6 +230,20 @@
     var details = D.details||{};
     var labels = D.labels||{};
     var L = function(k){ return labels[k]||k; };
+
+    /* 卡券字段的专用中文名（name 在卡券里指卡券名称，而非会员姓名） */
+    var VOUCHER_LABELS = {
+      name:'名称', sdate:'起始日期', edate:'到期日期',
+      cardid:'卡ID', ticketid:'券ID', tid:'券模板ID', cloth_name:'适用衣物',
+      times:'总次数', utimes:'已用次数', canuse:'可用范围',
+      ctids:'适用品类', wcids:'关联品类1', gcids:'关联品类2', jcids:'关联品类3',
+      overdue:'是否过期', expired:'是否失效', torderid:'关联订单', taskid:'活动ID',
+      limitrmb:'门槛·分', prmb:'原价·分', trmb:'累计金额·分', ormb:'订单金额·分',
+      ctype:'卡类型', ntype:'次数类型', rtype:'限次类型', reason:'原因码', cnum:'编号', title:'说明',
+      cut:'折扣值', status:'状态', type:'类型', code:'券码', cid:'关联ID'
+    };
+    var vlabel = function(k){ return VOUCHER_LABELS[k] || L(k); };
+    var MONEY_KEYS = { rmb:1, trmb:1, prmb:1, limitrmb:1, ormb:1 };
 
     members.forEach(function(m){
       m._uid = String(m.uid==null?'':m.uid);
@@ -406,12 +425,33 @@
         var vc = d.vipcard&&d.vipcard.list? d.vipcard.list : [];
         var tk = d.ticket&&d.ticket.list? d.ticket.list : [];
         H.push('<div class="minichips"><span class="minichip">VIP卡 <b>'+vc.length+'</b></span><span class="minichip">优惠券 <b>'+tk.length+'</b>（'+esc((d.ticket&&d.ticket.rmb)!=null?('¥'+fmtYuan(d.ticket.rmb)):'—')+'）</span></div>');
-        function renderList(items, title){
-          if(!items || !items.length) return '<div class="muted" style="margin-top:4px">（无'+title+'）</div>';
-          return items.map(function(it){
-            var parts=[]; for(var k in it){ if(Object.prototype.hasOwnProperty.call(it,k)){ parts.push('<span class="minichip">'+esc(L(k))+'：<b>'+esc(typeof it[k]==='object'?JSON.stringify(it[k]):it[k])+'</b></span>'); } }
-            return '<div class="minichips">'+parts.join('')+'</div>';
-          }).join('');
+        function renderVoucher(kind, it){
+          if(!it || typeof it!=='object') return '';
+          var titleText = it.name || (kind==='VIP卡' ? ('VIP卡 #'+((it.cardid!=null)?it.cardid:'')) : ('优惠券 #'+((it.ticketid!=null)?it.ticketid:'')));
+          var sub = (it.title && it.title!==it.name) ? it.title : '';
+          var dates = '';
+          if(it.sdate || it.edate){
+            dates = '有效期：' + (it.sdate?'<b>'+esc(it.sdate)+'</b>':'') + (it.sdate&&it.edate?' ~ ':'') + (it.edate?'<b>'+esc(it.edate)+'</b>':'');
+          }
+          var chips = [];
+          if(kind==='VIP卡' && Number(it.times)>0){
+            var left = Math.max(0, Number(it.times)-Number(it.utimes));
+            chips.push('<span class="minichip">次数：剩 <b>'+left+'</b> / 共 <b>'+Number(it.times)+'</b></span>');
+          }
+          var skip = { name:1,sdate:1,edate:1,uid:1,topid:1,pshopid:1,shopid:1,duid:1,buid:1,yuid:1,said:1,isdel:1,isccut:1,utime:1,ytime:1,dtime:1,times:1,utimes:1,title:1 };
+          var order = ['cardid','ticketid','tid','ctype','type','ntype','cut','rmb','trmb','prmb','limitrmb','ormb','status','canuse','cloth_name','ctids','wcids','gcids','jcids','code','note','cid','orderid','torderid','taskid','onum','cnum','reason','overdue','expired','ctime'];
+          var keys = Object.keys(it).filter(function(k){ if(skip[k]) return false; var v=it[k]; if(v==null||v==='') return false; if(typeof v==='string' && /^0000-00-00/.test(v)) return false; return true; });
+          keys.sort(function(a,b){ var ia=order.indexOf(a), ib=order.indexOf(b); if(ia<0) ia=999; if(ib<0) ib=999; return ia-ib; });
+          keys.forEach(function(k){
+            var v = it[k]; var txt = (typeof v==='object') ? JSON.stringify(v) : String(v);
+            if(MONEY_KEYS[k] && isFinite(Number(v))) { chips.push('<span class="minichip" title="原始值 '+esc(v)+'（分）">'+esc(vlabel(k))+'：<b>¥'+fmtYuan(v)+'</b></span>'); }
+            else { chips.push('<span class="minichip">'+esc(vlabel(k))+'：<b>'+esc(txt)+'</b></span>'); }
+          });
+          return '<div class="voucher"><div class="v-title">'+esc(titleText)+'</div>'+(sub?'<div class="v-sub">'+esc(sub)+'</div>':'')+(dates?'<div class="v-dates">'+dates+'</div>':'')+'<div class="minichips">'+chips.join('')+'</div></div>';
+        }
+        function renderList(items, kind){
+          if(!items || !items.length) return '<div class="muted" style="margin-top:4px">（无'+kind+'）</div>';
+          return items.map(function(it){ return renderVoucher(kind, it); }).join('');
         }
         H.push(renderList(vc,'VIP卡')+renderList(tk,'优惠券'));
         H.push('</div>');
