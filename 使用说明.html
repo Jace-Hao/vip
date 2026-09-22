@@ -42,7 +42,7 @@
   <header>
     <h1>洗衣管家 · 会员数据导出工具</h1>
     <p class="sub">把会员数据一键导出为 Excel：常规表 / 全量字段 / 完整详情</p>
-    <span class="badge">v1.3 · 2026-09-22 · 洗衣管家 6.1.23 实测通过</span>
+    <span class="badge">v1.4 · 2026-09-22 · 洗衣管家 6.1.23 实测通过</span>
   </header>
 
   <section class="card">
@@ -55,7 +55,7 @@
     <table>
       <tr><th>入口</th><th>用时</th><th>导出内容</th></tr>
       <tr><td><code>导出会员数据.cmd</code>（日常推荐）</td><td>几秒钟</td><td>常规表（9 列）+ <strong>全量字段表</strong>（会员档案全部字段，62 列）</td></tr>
-      <tr><td><code>导出会员数据(含详情).cmd</code>（完整版）</td><td>几分钟</td><td>上面全部 + 逐会员<strong>详情</strong>：标签、充值/赠送余额、卡券、<strong>订单明细</strong>、最近充值信息；支持断点续传</td></tr>
+      <tr><td><code>导出会员数据(含详情).cmd</code>（完整版）</td><td>几分钟</td><td>上面全部 + 逐会员<strong>详情</strong>：标签、充值/赠送余额、卡券、<strong>订单明细</strong>、最近充值信息；<strong>增量更新</strong>（只重取新增/变更会员）；支持断点续传</td></tr>
     </table>
   </section>
 
@@ -124,6 +124,10 @@
     <details>
       <summary>全量字段里的金额为什么是“分”？</summary>
       <p>为保持原始数据不失真，全量表按系统存储单位（分）导出；常规表的余额已换算成“元”。</p>
+    </details>
+    <details>
+      <summary>后续更新会不会很慢？</summary>
+      <p>不会。工具会先与上次数据<strong>比对</strong>：只重新获取新增会员和有变化的会员（如余额变动、新订单、资料修改），没变化的直接使用已存详情。日常更新通常只需几十秒到几分钟。</p>
     </details>
     <details>
       <summary>含详情模式中途断了怎么办？</summary>

@@ -5,18 +5,20 @@
  * 功能：
  *   1) 常规导出：联系人/电话/级别/余额等 9 列汇总（csv/json/xlsx）
  *   2) 全量字段：会员列表接口返回的【全部字段】（csv/xlsx，含在 json 里）
- *   3) 深度详情（--deep）：逐会员抓取详情（标签、券、卡、订单、充值等），
- *      支持断点续传；低速安全速率；失败自动等待 180 秒重试，约 15~30 分钟
+ *   3) 深度详情（--deep）：逐会员抓取详情（标签、券、卡、订单、充值等）；
+ *      增量比对：仅抓取新增/有变更的会员（--deep-full 可强制全量）；
+ *      支持断点续传；低速安全速率；失败自动等待 180 秒重试；
  *
  * 原理：洗衣管家是内嵌浏览器(CefSharp)的桌面程序，运行在 127.0.0.1:9222
  *       调试端口上。本工具在该端口内调用软件自身的接口读取数据。
  * 只读用途：不会修改软件内任何内容。
  * 依赖：Node.js 18+（内置 fetch / WebSocket，无第三方包）
- * 用法：node export.mjs [--deep] [--deep-limit=N] [--out=目录] [--page-size=200]
+ * 用法：node export.mjs [--deep] [--deep-full] [--deep-limit=N] [--out=目录] [--page-size=200]
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -47,6 +49,7 @@ const FULL_LABELS = {
 let OUT_DIR = path.join(ROOT, '导出结果');
 let PAGE_SIZE = 200;
 let DEEP = false;
+let DEEP_FULL = false; // --deep-full：跳过比对，强制全量重抓
 let DEEP_LIMIT = 0; // >0 时仅取前 N 个会员（测试用）
 for (const a of process.argv.slice(2)) {
   if (a.startsWith('--out=')) OUT_DIR = path.resolve(a.slice(6));
@@ -54,6 +57,7 @@ for (const a of process.argv.slice(2)) {
     const n = parseInt(a.slice(12), 10);
     if (n) PAGE_SIZE = Math.min(200, Math.max(10, n));
   } else if (a === '--deep') DEEP = true;
+  else if (a === '--deep-full') { DEEP = true; DEEP_FULL = true; }
   else if (a.startsWith('--deep-limit=')) DEEP_LIMIT = Math.max(1, parseInt(a.slice(13), 10) || 0);
 }
 if (!DEEP_LIMIT && process.env.LAUNDRY_DEEP_LIMIT) {
@@ -87,6 +91,16 @@ function die(msg, code = 1) {
 
 function statusText(s) {
   return Object.prototype.hasOwnProperty.call(STATUS_MAP, s) ? STATUS_MAP[s] : ('状态' + s);
+}
+
+/* 会员“指纹”：用于增量比对判断数据是否变更（排除易变的登录IP字段） */
+function memberSig(m) {
+  const o = {};
+  for (const k of Object.keys(m).sort()) {
+    if (k === 'ip') continue;
+    o[k] = m[k];
+  }
+  return createHash('md5').update(JSON.stringify(o)).digest('hex');
 }
 
 function stamp() {
@@ -457,28 +471,84 @@ async function main() {
     const deepJsonPath = path.join(OUT_DIR, `会员详情_${ts}.json`);
     const deepXlsxPath = path.join(OUT_DIR, `会员详情_${ts}.xlsx`);
 
-    // 断点续传：读取已完成的 uid（超过 20 小时视为过期，重新开始）
+    // ===== 增量比对：加载/建立缓存，只抓取新增或有变更的会员 =====
+    const cachePath = path.join(OUT_DIR, '.detail_cache.json');
+    let cache = null;
+    try { if (fs.existsSync(cachePath)) cache = JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch (e) { cache = null; }
+    if (!cache || !cache.entries) {
+      cache = { savedAt: '', entries: {} };
+      if (!DEEP_FULL) {
+        let seeded = 0, baseline = 0;
+        try {
+          const detFiles = fs.readdirSync(OUT_DIR).filter((f) => f.startsWith('会员详情_') && f.endsWith('.json')).sort();
+          const detMap = new Map();
+          if (detFiles.length) {
+            const dj = JSON.parse(fs.readFileSync(path.join(OUT_DIR, detFiles[detFiles.length - 1]), 'utf8'));
+            for (const d of (dj.details || [])) { if (d && d.uid != null) detMap.set(String(d.uid), d); }
+          }
+          const curSnap = `会员导出_${ts}.json`; // 排除本次自己的快照，取上一次的列表作为比对基准
+          const listFiles = fs.readdirSync(OUT_DIR).filter((f) => f.startsWith('会员导出_') && f.endsWith('.json') && f !== curSnap).sort();
+          const oldSigs = new Map();
+          if (listFiles.length) {
+            const oj = JSON.parse(fs.readFileSync(path.join(OUT_DIR, listFiles[listFiles.length - 1]), 'utf8'));
+            if (oj.fullHeaders && oj.fullRows) {
+              const keys = oj.fullHeaders.map((h) => { const mm = /（([^（）]+)）\s*$/.exec(h); return mm ? mm[1] : h; });
+              for (const r of oj.fullRows) {
+                const mo = {}; keys.forEach((kk, ii) => { mo[kk] = r[ii]; });
+                if (mo.uid != null) oldSigs.set(String(mo.uid), memberSig(mo));
+              }
+            }
+          }
+          for (const [uid, det] of detMap) {
+            cache.entries[uid] = { sig: oldSigs.get(uid) || null, detail: det };
+            seeded++;
+          }
+          baseline = oldSigs.size;
+        } catch (e) { log('      [提示] 建立比对缓存时出现问题（将按需重抓）：' + (e && e.message)); }
+        if (seeded) log(`      首次启用增量比对：已从既有数据建立缓存（${seeded} 人；其中 ${baseline} 人有比对基准）`);
+      }
+    }
+
+    // 断点续传：读取本次已完成的 uid（超过 20 小时视为过期，重新开始）
     const doneUids = new Set();
     if (fs.existsSync(jsonlPath)) {
       const ageMs = Date.now() - fs.statSync(jsonlPath).mtimeMs;
       if (ageMs > 20 * 3600 * 1000) {
         fs.unlinkSync(jsonlPath);
       } else {
-        const lines = fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/).filter(Boolean);
-        for (const ln of lines) {
+        for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {
+          if (!ln) continue;
           try { const o = JSON.parse(ln); if (o && o.uid != null) doneUids.add(String(o.uid)); } catch (e) { /* 忽略半行 */ }
         }
-        if (doneUids.size) log(`      检测到中断记录：已完成 ${doneUids.size} 个会员，本次跳过（断点续传）`);
+        if (doneUids.size) log(`      检测到中断记录：本次已完成 ${doneUids.size} 个，跳过（断点续传）`);
       }
     }
 
-    const remaining = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
+    // 变更比对：只抓取「无缓存」或「签名有变化」的会员
+    let needFetch = [];
+    if (DEEP_FULL) {
+      log('      已指定全量刷新模式（--deep-full）：将重新获取全部会员详情');
+      needFetch = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
+    } else {
+      let skipCount = 0, newCount = 0, changedCount = 0;
+      for (const m of deepTargets) {
+        const uid = String(m.uid);
+        if (doneUids.has(uid)) continue; // 本次已抓取
+        const e = cache.entries[uid];
+        if (!e || !e.detail) { needFetch.push(m); newCount++; }
+        else if (!e.sig || e.sig !== memberSig(m)) { needFetch.push(m); changedCount++; }
+        else skipCount++;
+      }
+      log(`      数据比对：无需更新 ${skipCount} 人；需重新获取 ${needFetch.length} 人（新会员 ${newCount}、有变更 ${changedCount}）`);
+    }
+
+    const remaining = needFetch;
     log('');
-    log(`[5/5] 正在抓取会员详情（共需 ${deepTargets.length} 个，剩余 ${remaining.length} 个，预计需数分钟）...`);
+    log(`[5/5] 正在抓取会员详情（本次需获取 ${remaining.length} 个 / 共 ${deepTargets.length} 个）...`);
 
     const BATCH = 5;
     const errors = [];
-    let done = deepTargets.length - remaining.length;
+    let done = 0;
     let pace = 1500;
     let lastOkAt = Date.now();
     let stopAll = false;
@@ -533,7 +603,7 @@ async function main() {
         } catch (e) { /* ignore */ }
       }
       if (stopAll) break;
-      log(`      详情进度 ${done} / ${deepTargets.length}${errors.length ? `（跳过 ${errors.length}）` : ''}`);
+      log(`      详情进度 ${done} / ${remaining.length}${errors.length ? `（跳过 ${errors.length}）` : ''}`);
       if (Date.now() - lastOkAt > 30 * 60 * 1000) {
         log('');
         log('      [提示] 已连续 30 分钟没有成功取回数据，自动停止（数据已保存，稍后可重跑续传）。');
@@ -542,16 +612,31 @@ async function main() {
       await sleep(pace);
     }
 
-    // 汇总详情
-    const details = [];
+    // 汇总详情：本次抓取结果（jsonl） + 未变更会员的既有缓存
+    const fetchedMap = new Map();
     if (fs.existsSync(jsonlPath)) {
       for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {
         if (!ln) continue;
-        try { const o = JSON.parse(ln); if (o && o.detail) details.push(o.detail); } catch (e) { /* ignore */ }
+        try { const o = JSON.parse(ln); if (o && o.detail && o.uid != null) fetchedMap.set(String(o.uid), o.detail); } catch (e) { /* ignore */ }
       }
+    }
+    const details = [];
+    for (const m of deepTargets) {
+      const uid = String(m.uid);
+      const det = fetchedMap.get(uid) || (cache.entries[uid] ? cache.entries[uid].detail : null);
+      if (det) details.push(det);
     }
     const orderIndex = new Map(members.map((m, idx) => [String(m.uid), idx]));
     details.sort((a, b) => (orderIndex.get(String(a.uid)) ?? 1e9) - (orderIndex.get(String(b.uid)) ?? 1e9));
+
+    // 更新比对缓存：本次抓到的新数据写入；未变更的保留原缓存
+    for (const m of deepTargets) {
+      const uid = String(m.uid);
+      const det = fetchedMap.get(uid);
+      if (det) cache.entries[uid] = { sig: memberSig(m), detail: det };
+    }
+    cache.savedAt = new Date().toISOString();
+    try { fs.writeFileSync(cachePath, JSON.stringify(cache), 'utf8'); } catch (e) { log('      [提示] 比对缓存写入失败：' + (e && e.message)); }
 
     const deepPayload = {
       tool: '洗衣管家会员导出·会员详情',
@@ -568,8 +653,8 @@ async function main() {
     ptr.deepXlsx = deepXlsxPath;
 
     if (details.length && errors.length === 0) {
-      try { fs.unlinkSync(jsonlPath); } catch (e) { /* ignore */ }
-      log('      详情抓取完成（临时文件已清理）');
+      try { if (fs.existsSync(jsonlPath)) fs.unlinkSync(jsonlPath); } catch (e) { /* ignore */ }
+      log(remaining.length ? '      详情抓取完成（临时文件已清理）' : '      没有需要更新的会员（增量比对完成）');
     } else if (errors.length) {
       log(`      详情抓取结束：成功 ${details.length}，失败 ${errors.length}（失败项可整体重跑本命令补抓）`);
     }
