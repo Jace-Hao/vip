@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会员订单抓取 · 操作台</title>
+<style>
+  :root{
+    --ink:#1c2430; --sub:#5b6675; --line:#e2e6ee; --bg:#f4f6fb; --card:#fff;
+    --brand:#2b54a8; --brand2:#3b6fd4; --ok:#1f8a4c; --warn:#b7791f; --bad:#c94f4f;
+    --accent:#e8720c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.7 "Microsoft YaHei","微软雅黑",sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:26px 20px 60px}
+  header h1{margin:0;font-size:21px;letter-spacing:.5px}
+  header .sub{color:var(--sub);font-size:13px;margin-top:2px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 24px;margin-top:16px;box-shadow:0 3px 12px rgba(31,42,68,.05)}
+  .phase{font-size:26px;font-weight:800;letter-spacing:1px}
+  .phase.run{color:var(--brand)} .phase.done{color:var(--ok)} .phase.pause{color:var(--warn)} .phase.fail{color:var(--bad)}
+  .phase-sub{color:var(--sub);font-size:13px;margin-top:2px}
+  .bar{height:14px;background:#e8edf6;border-radius:999px;overflow:hidden;margin:14px 0 6px}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,#2b54a8,#3b6fd4);border-radius:999px;transition:width .4s}
+  .bar-text{font-size:12.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:16px}
+  .stat{background:#f7f9fd;border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+  .stat .k{color:var(--sub);font-size:12px}
+  .stat .v{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:2px}
+  .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+  button{border:0;border-radius:10px;padding:11px 26px;font-size:15px;font-weight:700;cursor:pointer;transition:.15s;font-family:inherit}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #btnStart{background:var(--brand);color:#fff} #btnStart:hover:not(:disabled){background:#3b6fd4}
+  #btnPause{background:#fff;color:var(--bad);border:2px solid var(--bad)} #btnPause:hover:not(:disabled){background:#fdecec}
+  .btn2{background:#fff;color:var(--brand-ink,#2b54a8);border:1px solid var(--line);padding:9px 18px;font-size:13.5px;font-weight:600}
+  .btn2:hover{border-color:var(--brand);color:var(--brand)}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .chip{background:#eef3fc;border:1px solid var(--line);border-radius:999px;padding:3px 12px;font-size:12.5px;color:#42536f}
+  .chip b{color:var(--brand-ink)}
+  .chip.bad{background:#fdecec;border-color:#f3caca;color:var(--bad)}
+  .logcard{background:#101826;border-radius:12px;margin-top:16px;overflow:hidden}
+  .log-head{padding:9px 16px;color:#9fb0cc;font-size:12.5px;border-bottom:1px solid #233150;display:flex;justify-content:space-between}
+  pre#log{margin:0;padding:14px 16px;color:#c8d6ee;font:12px/1.75 Consolas,"Courier New",monospace;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .help{color:var(--sub);font-size:13px}
+  .help li{margin:4px 0}
+  .off{background:#fff;border:1px solid var(--line);border-radius:12px;padding:30px;margin-top:20px;text-align:center;color:var(--sub)}
+  .off code{background:#eef3fc;border-radius:6px;padding:2px 8px;color:var(--brand-ink)}
+  .blink{animation:bl 1.2s infinite}
+  @keyframes bl{50%{opacity:.35}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>会员订单数据抓取 · 操作台</h1>
+    <div class="sub">从洗衣管家抓取全部会员的订单详情（衣物 / 照片 / 支付 / 状态）· 全程只读 · 断点续传</div>
+  </header>
+
+  <div class="card" id="statusCard">
+    <div class="phase" id="phase">连接中…</div>
+    <div class="phase-sub" id="phaseSub">—</div>
+    <div class="bar"><i id="barFill" style="width:0%"></i></div>
+    <div class="bar-text" id="barText">—</div>
+    <div class="grid" id="stats"></div>
+    <div class="chips" id="chips"></div>
+    <div class="actions">
+      <button id="btnStart">开始抓取</button>
+      <button id="btnPause" disabled>暂停</button>
+      <button class="btn2" id="btnRebuild">刷新查询页数据</button>
+      <button class="btn2" id="btnViewer">打开查询页面</button>
+      <button class="btn2" id="btnFolder">打开数据文件夹</button>
+    </div>
+  </div>
+
+  <div class="logcard">
+    <div class="log-head"><span>运行日志（实时）</span><span id="logMeta"></span></div>
+    <pre id="log">—</pre>
+  </div>
+
+  <div class="card help">
+    <strong>使用说明</strong>
+    <ul>
+      <li>点击<strong>开始抓取</strong>：自动先更新会员详情（增量），再抓取全部订单（约 1911 位会员 / 1.76 万单）。</li>
+      <li>点击<strong>暂停</strong>：停止抓取进程，<strong>已抓数据全部保留</strong>；再次点击开始会从中断处自动续传。</li>
+      <li>抓取期间请保持洗衣管家开启并已登录；本页面可以关闭，服务在后台继续运行（地址 <code>http://127.0.0.1:8791</code>）。</li>
+      <li>全部完成后：双击「打开会员查询页面.cmd」即可在查询台中查看所有会员的完整订单。</li>
+      <li>若提示调试端口不可用：请完全退出洗衣管家，双击工具目录里的「以调试模式启动洗衣管家.cmd」后再开始。</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+  var $ = function(s){ return document.querySelector(s); };
+  var PHASE_TEXT = { idle:'未运行', deep:'阶段 1 · 会员详情增量更新', orders:'阶段 2 · 订单抓取中', paused:'已暂停（进度保留）', done:'已完成', failed:'异常退出' };
+  var serverOk = true;
+
+  function api(path, method, body){
+    return fetch(path, { method: method || 'GET', headers: {'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined })
+      .then(function(r){ return r.json().then(function(j){ return { code: r.status, j: j }; }); });
+  }
+  function toast(msg){
+    var t = $('#toast'); if (!t) return;
+    t.textContent = msg; t.style.opacity = '.95';
+    clearTimeout(t._tm); t._tm = setTimeout(function(){ t.style.opacity = '0'; }, 2200);
+  }
+
+  function render(st){
+    var ph = $('#phase');
+    ph.textContent = st.phaseText || st.phase;
+    ph.className = 'phase ' + (st.phase === 'paused' ? 'pause' : st.phase === 'done' ? 'done' : st.phase === 'failed' ? 'fail' : 'run') + (st.running ? ' blink' : '');
+    $('#phaseSub').textContent = st.running
+      ? ('运行中 · 已耗时 ' + st.elapsedSec + ' 秒' + (st.childKind === 'deep' ? '（此阶段完成后自动进入订单抓取）' : ''))
+      : (st.phase === 'paused' ? '进度已保留 — 点击「开始/继续抓取」可从中断处续传'
+        : st.phase === 'done' ? '点击「开始抓取」可再次运行（自动跳过已抓取内容）'
+        : st.phase === 'failed' ? '请查看日志中的错误信息' : '点击「开始抓取」运行');
+
+    // 进度条
+    var pct = 0, txt = '—';
+    if (st.phase === 'deep' && st.deepProgress && st.deepProgress.total > 0) {
+      pct = Math.round(100 * st.deepProgress.done / st.deepProgress.total);
+      txt = '会员详情增量：' + st.deepProgress.done + ' / ' + st.deepProgress.total;
+    } else if (st.phase === 'orders' && st.progress.total > 0) {
+      pct = Math.round(100 * st.progress.done / st.progress.total);
+      txt = '订单抓取：' + st.progress.done + ' / ' + st.progress.total + ' 人 · 当前：' + (st.progress.current || '—') + '（' + (st.progress.memberOrders || 0) + ' 单）';
+    } else if (st.phase === 'done') { pct = 100; txt = '已完成'; }
+    else if (st.phase === 'paused') { pct = 0; txt = '已暂停'; }
+    $('#barFill').style.width = pct + '%';
+    $('#barText').textContent = txt;
+
+    // 统计
+    var s = st.stats || {};
+    var items = [
+      ['会员总数', s.totalMembers != null ? s.totalMembers : '—'],
+      ['目标（有订单）', s.withOrders != null ? s.withOrders : '—'],
+      ['已完成会员', s.doneMembers != null ? s.doneMembers : '—'],
+      ['累计订单', s.ordersTotal != null ? s.ordersTotal : '—'],
+      ['预计剩余', st.etaMin != null ? (st.etaMin + ' 分钟') : (st.running ? '估算中' : '—')],
+      ['耗时', st.startedAt ? (st.elapsedSec + ' 秒') : '—']
+    ];
+    $('#stats').innerHTML = items.map(function(x){ return '<div class="stat"><div class="k">' + x[0] + '</div><div class="v">' + x[1] + '</div></div>'; }).join('');
+
+    // 环境芯片
+    var chips = [];
+    chips.push(st.cdp === 'ok' ? '<span class="chip">调试端口 <b>正常</b></span>' : '<span class="chip bad">调试端口不可用 — 需以调试模式重启洗衣管家</span>');
+    if (st.compare) chips.push('<span class="chip">比对：无需更新 <b>' + st.compare.skip + '</b> · 需抓取 <b>' + st.compare.fetch + '</b></span>');
+    if (s.exportStamp) chips.push('<span class="chip">数据时间：' + s.exportStamp + '</span>');
+    $('#chips').innerHTML = chips.join('');
+
+    // 日志
+    var log = $('#log');
+    var keepScroll = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    log.textContent = (st.logTail || []).join('\n') || '—';
+    if (keepScroll) log.scrollTop = log.scrollHeight;
+    $('#logMeta').textContent = st.running ? '运行中' : '已停止';
+
+    // 按钮
+    var bs = $('#btnStart');
+    bs.disabled = !!st.running;
+    bs.textContent = (st.phase === 'paused' || (s.doneMembers > 0 && !st.running)) ? '继续抓取' : '开始抓取';
+    $('#btnPause').disabled = !st.running;
+    $('#btnRebuild').disabled = !!st.running || !!st.rebuilding;
+  }
+
+  function poll(){
+    api('/api/status').then(function(r){
+      serverOk = true;
+      render(r.j);
+    }).catch(function(){
+      if (serverOk) {
+        serverOk = false;
+        $('#phase').textContent = '服务未连接';
+        $('#phase').className = 'phase fail';
+        $('#phaseSub').innerHTML = '请双击工具目录里的 <code>打开订单抓取操作台.cmd</code> 启动服务后再操作。';
+      }
+    });
+  }
+
+  $('#btnStart').addEventListener('click', function(){
+    var b = this; b.disabled = true; b.textContent = '正在启动…';
+    api('/api/start', 'POST', {}).then(function(r){
+      if (r.j && r.j.error) toast(r.j.error);
+      poll();
+    }).catch(function(){ toast('启动请求失败'); }).finally ? null : null;
+    setTimeout(function(){ poll(); }, 800);
+  });
+  $('#btnPause').addEventListener('click', function(){
+    var b = this; b.disabled = true;
+    api('/api/stop', 'POST').then(function(r){ toast(r.j && r.j.ok ? '已暂停（进度保留）' : (r.j && r.j.error) || '操作失败'); poll(); });
+  });
+  $('#btnRebuild').addEventListener('click', function(){
+    var b = this; b.disabled = true; b.textContent = '生成中…';
+    api('/api/rebuild', 'POST').then(function(){ toast('查询页数据已刷新'); b.disabled = false; b.textContent = '刷新查询页数据'; poll(); });
+  });
+  $('#btnViewer').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'viewer' }); });
+  $('#btnFolder').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'folder' }); });
+
+  poll();
+  setInterval(poll, 2000);
+})();
+</script>
+</body>
+</html>

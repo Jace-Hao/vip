@@ -34,6 +34,24 @@ for (const a of process.argv.slice(2)) {
 }
 if (!UID && SAMPLE <= 0) { console.error('用法: node fetch_orders.mjs --uid=<会员ID> 或 --sample=<N> [--out=目录] [--no-html]'); process.exit(1); }
 
+/* 单实例锁：同一时间只允许一个抓取任务（操作台/命令行/定时任务通用） */
+const LOCK_PATH = path.join(OUT_DIR, '.orders_run.lock');
+function acquireLock() {
+  try {
+    if (fs.existsSync(LOCK_PATH)) {
+      const pid = parseInt(fs.readFileSync(LOCK_PATH, 'utf8').trim(), 10);
+      let alive = false;
+      try { process.kill(pid, 0); alive = true; } catch (e) { alive = false; }
+      if (alive) { console.error('[错误] 已有订单抓取任务在运行（PID ' + pid + '）。可在操作台点击“暂停”停止后重试。'); return false; }
+    }
+    fs.writeFileSync(LOCK_PATH, String(process.pid));
+    return true;
+  } catch (e) { console.error('[错误] 锁处理失败：' + (e && e.message)); return false; }
+}
+process.on('exit', function () {
+  try { if (fs.existsSync(LOCK_PATH) && fs.readFileSync(LOCK_PATH, 'utf8').trim() === String(process.pid)) fs.unlinkSync(LOCK_PATH); } catch (e) { /* ignore */ }
+});
+
 function memberSig(m) {
   const o = {};
   for (const k of Object.keys(m).sort()) {
@@ -273,6 +291,7 @@ async function main() {
   console.log('==================================================');
   console.log('   洗衣管家 · 会员订单数据抓取（试点）');
   console.log('==================================================');
+  if (!acquireLock()) { setTimeout(() => process.exit(1), 200); return; }
   if (UID) console.log('会员ID:', UID); else console.log(SAMPLE >= 1000000 ? '模式：全量抓取（全部有订单的会员）' : `抽样数量: ${SAMPLE}`);
 
   const target = await findTarget();

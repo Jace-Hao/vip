@@ -1,0 +1,262 @@
+#!/usr/bin/env node
+/* ============================================================
+ * 洗衣管家 · 会员订单抓取操作台服务
+ * ------------------------------------------------------------
+ * 端口：127.0.0.1:8791（仅本机可访问）
+ * 提供：
+ *   GET  /            操作页面
+ *   GET  /api/status  实时状态（阶段/进度/统计/日志）
+ *   POST /api/start   开始抓取（可选 {"sample":N} 小批量试点）
+ *   POST /api/stop    暂停（停止进程，进度保留，可继续）
+ *   POST /api/rebuild 刷新查询页面数据
+ *   POST /api/open    打开查询页面 / 数据文件夹
+ * ============================================================ */
+import fs from 'node:fs';
+import path from 'node:path';
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
+const PORT = 8791;
+const OUT_DIR = path.join(ROOT, '导出结果', '订单数据');
+const PAGE_FILE = path.join(ROOT, '操作页面.html');
+const LOCK_PATH = path.join(OUT_DIR, '.orders_run.lock');
+const JSONL_PATH = path.join(OUT_DIR, '.orders_results.jsonl');
+const LOG_MAX = 500;
+
+let child = null;
+let childKind = null; // deep | orders
+let phase = 'idle';   // idle | deep | orders | paused | done | failed
+let startedAt = null;
+let lastExit = null;
+let stopReq = false;
+let rebuilding = false;
+let logBuf = [];
+let baseStats = null;   // { members, withOrders, ordersSum, exportStamp }
+let baseDone = 0;       // 启动抓取时 jsonl 已完成人数
+let baseOrders = 0;     // 启动抓取时 jsonl 已有订单数
+let state = {
+  progress: { done: 0, total: 0, current: '', memberOrders: 0 },
+  compare: null,
+  deepProgress: null,
+  cumulative: null,
+  etaMin: null,
+  totalWithOrders: null,
+  ordersThisRun: 0,
+};
+
+function nowStr() { const d = new Date(), p = (x) => String(x).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+function pushLog(line) { logBuf.push(nowStr() + '  ' + line); if (logBuf.length > LOG_MAX) logBuf.splice(0, logBuf.length - LOG_MAX); }
+function clearLock() { try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PATH); } catch (e) { /* ignore */ } }
+
+function readJsonlStats() {
+  try {
+    if (!fs.existsSync(JSONL_PATH)) return { members: 0, orders: 0 };
+    let members = 0, orders = 0;
+    for (const ln of fs.readFileSync(JSONL_PATH, 'utf8').split(/\r?\n/)) {
+      if (!ln) continue;
+      try { const o = JSON.parse(ln); if (o && o.uid != null) { members++; orders += (o.orderCount != null ? Number(o.orderCount) : ((o.orders || []).length)); } } catch (e) { /* ignore */ }
+    }
+    return { members, orders };
+  } catch (e) { return { members: 0, orders: 0 }; }
+}
+
+function loadBaseStats() {
+  try {
+    const dir = path.join(ROOT, '导出结果');
+    const files = fs.readdirSync(dir).filter((f) => f.startsWith('会员导出_') && f.endsWith('.json')).sort();
+    if (!files.length) return null;
+    const j = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8'));
+    const keys = (j.fullHeaders || []).map((h) => { const m = /（([^（）]+)）\s*$/.exec(h); return m ? m[1] : h; });
+    let withOrders = 0, ordersSum = 0;
+    for (const r of (j.fullRows || [])) {
+      const m = {}; keys.forEach((k, i) => { m[k] = r[i]; });
+      const n = Number(m.onum) || 0; ordersSum += n; if (n > 0) withOrders++;
+    }
+    return { members: (j.fullRows || []).length, withOrders, ordersSum, exportStamp: (j.exportStamp || '') };
+  } catch (e) { return null; }
+}
+
+/* ---------------- 子进程管理 ---------------- */
+function wireChild(ch) {
+  let buf = '';
+  const feed = (d) => {
+    buf += d.toString();
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).replace(/\r$/, '');
+      buf = buf.slice(i + 1);
+      if (line.trim()) { pushLog(line); parseLine(line); }
+    }
+  };
+  ch.stdout.on('data', feed);
+  ch.stderr.on('data', feed);
+}
+
+function parseLine(line) {
+  let m = line.match(/\[(\d+)\/(\d+)\]\s*(.+?)：(\d+) 单/);
+  if (m) { state.progress.done = +m[1]; state.progress.total = +m[2]; state.progress.current = m[3]; state.progress.memberOrders = +m[4]; state.ordersThisRun += +m[4]; return; }
+  m = line.match(/数据比对：无需更新 (\d+) 人，需抓取 (\d+) 人（新增 (\d+)、有变化 (\d+)）/);
+  if (m) { state.compare = { skip: +m[1], fetch: +m[2], newN: +m[3], chgN: +m[4] }; return; }
+  m = line.match(/含订单会员共 (\d+) 人/);
+  if (m) { state.totalWithOrders = +m[1]; return; }
+  m = line.match(/详情进度 (\d+) \/ (\d+)/);
+  if (m) { state.deepProgress = { done: +m[1], total: +m[2] }; return; }
+  m = line.match(/共 (\d+) 人、(\d+) 单/);
+  if (m) { state.cumulative = { members: +m[1], orders: +m[2] }; return; }
+  m = line.match(/剩余 (\d+) 人约需 (\d+) 分钟/);
+  if (m) { state.etaMin = +m[2]; return; }
+  m = line.match(/\[错误\] (.+)/);
+  if (m) { state.lastError = m[1]; }
+}
+
+function spawnPhase(kind) {
+  const args = kind === 'deep' ? ['app/export.mjs', '--deep'] : ['app/fetch_orders.mjs', '--all'];
+  childKind = kind;
+  phase = kind;
+  child = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  pushLog(kind === 'deep' ? '阶段1：会员详情增量更新已启动' : '阶段2：订单全量抓取已启动');
+  wireChild(child);
+  child.on('exit', (code) => {
+    child = null;
+    if (stopReq) { phase = 'paused'; pushLog('已暂停（进度保留，点击“开始/继续”可续传）'); clearLock(); stopReq = false; return; }
+    if (childKind === 'deep') {
+      if (code === 0) { pushLog('会员详情增量更新完成，继续订单抓取...'); spawnPhase('orders'); }
+      else { phase = 'failed'; lastExit = { kind: 'deep', code }; pushLog('会员详情更新异常退出（代码 ' + code + '），已停止。'); clearLock(); }
+    } else {
+      phase = code === 0 ? 'done' : 'failed';
+      lastExit = { kind: 'orders', code };
+      pushLog(code === 0 ? '订单抓取完成。' : ('订单抓取进程退出（代码 ' + code + '）'));
+      clearLock();
+    }
+  });
+}
+
+function start(sample) {
+  if (child) return { error: '已有任务在运行' };
+  stopReq = false; lastExit = null;
+  state = { progress: { done: 0, total: 0, current: '', memberOrders: 0 }, compare: null, deepProgress: null, cumulative: null, etaMin: null, totalWithOrders: state.totalWithOrders, ordersThisRun: 0, lastError: null };
+  const js = readJsonlStats();
+  baseDone = js.members; baseOrders = js.orders;
+  clearLock();
+  startedAt = new Date().toISOString();
+  const args = sample > 0 ? ['app/fetch_orders.mjs', '--sample=' + sample] : ['app/fetch_orders.mjs', '--all'];
+  spawnPhase('deep');
+  return { ok: true, sample: sample > 0 ? sample : 'all' };
+}
+
+function stop() {
+  if (!child) return { error: '没有正在运行的任务' };
+  stopReq = true;
+  try { child.kill(); } catch (e) { /* ignore */ }
+  setTimeout(clearLock, 800);
+  return { ok: true };
+}
+
+function rebuild() {
+  if (rebuilding) return { error: '正在生成中，请稍候' };
+  const py = path.join(process.env.LOCALAPPDATA || '', 'Python', 'bin', 'python.exe');
+  const exe = fs.existsSync(py) ? py : 'python';
+  rebuilding = true;
+  const ch = spawn(exe, ['app/build_viewer.py'], { cwd: ROOT, stdio: 'ignore' });
+  ch.on('exit', (code) => { rebuilding = false; pushLog(code === 0 ? '查询页面数据已刷新' : '查询页面数据刷新失败'); });
+  return { ok: true };
+}
+
+/* ---------------- 状态 ---------------- */
+async function cdpCheck() {
+  try { await fetch('http://127.0.0.1:9222/json/list', { signal: AbortSignal.timeout(1500) }); return 'ok'; } catch (e) { return '不可用'; }
+}
+
+async function statusPayload() {
+  const running = !!child;
+  const jsNow = running ? null : readJsonlStats();
+  const doneMembers = running ? (baseDone + state.progress.done) : (jsNow ? jsNow.members : 0);
+  const ordersTotal = running ? (baseOrders + state.ordersThisRun) : (jsNow ? jsNow.orders : 0);
+  return {
+    phase,
+    phaseText: ({ idle: '未运行', deep: '阶段1：会员详情增量更新', orders: '阶段2：订单抓取', paused: '已暂停（进度保留）', done: '已完成', failed: '异常退出' })[phase] || phase,
+    running,
+    childKind,
+    startedAt,
+    lastExit,
+    elapsedSec: startedAt ? Math.round((Date.now() - new Date(startedAt).getTime()) / 1000) : 0,
+    progress: state.progress,
+    compare: state.compare,
+    deepProgress: state.deepProgress,
+    etaMin: state.etaMin,
+    stats: {
+      totalMembers: baseStats ? baseStats.members : null,
+      withOrders: baseStats ? baseStats.withOrders : null,
+      ordersSum: baseStats ? baseStats.ordersSum : null,
+      doneMembers,
+      ordersTotal,
+    },
+    cdp: await cdpCheck(),
+    rebuilding,
+    serverPort: PORT,
+    logTail: logBuf.slice(-25),
+  };
+}
+
+/* ---------------- HTTP ---------------- */
+function sendJson(res, obj, code = 200) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let b = '';
+    req.on('data', (c) => { b += c; if (b.length > 1e6) req.destroy(); });
+    req.on('end', () => { try { resolve(b ? JSON.parse(b) : {}); } catch (e) { resolve({}); } });
+    req.on('error', () => resolve({}));
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const u = new URL(req.url, 'http://127.0.0.1');
+  const p = u.pathname;
+  try {
+    if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+      let html = '';
+      try { html = fs.readFileSync(PAGE_FILE, 'utf8'); } catch (e) { html = '<!DOCTYPE html><meta charset="utf-8"><body style="font-family:sans-serif">未找到 操作页面.html</body>'; }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(html);
+      return;
+    }
+    if (req.method === 'GET' && p === '/api/status') { sendJson(res, await statusPayload()); return; }
+    if (req.method === 'POST' && p === '/api/start') {
+      const body = await readBody(req);
+      const sample = Number(body.sample) > 0 ? Number(body.sample) : 0;
+      const r = start(sample);
+      sendJson(res, r, r.error ? 409 : 200);
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/stop') { const r = stop(); sendJson(res, r, r.ok ? 200 : 409); return; }
+    if (req.method === 'POST' && p === '/api/rebuild') { sendJson(res, rebuild()); return; }
+    if (req.method === 'POST' && p === '/api/open') {
+      const body = await readBody(req);
+      const what = body.what === 'folder' ? path.join(ROOT, '导出结果', '订单数据') : path.join(ROOT, '查询页面', 'index.html');
+      try { spawn('cmd.exe', ['/c', 'start', '', what], { cwd: ROOT, stdio: 'ignore', detached: true }); } catch (e) { /* ignore */ }
+      sendJson(res, { ok: true });
+      return;
+    }
+    sendJson(res, { error: 'not found' }, 404);
+  } catch (e) {
+    sendJson(res, { error: (e && e.message) || String(e) }, 500);
+  }
+});
+
+/* ---------------- 启动 ---------------- */
+baseStats = loadBaseStats();
+const js0 = readJsonlStats();
+baseDone = js0.members; baseOrders = js0.orders;
+server.listen(PORT, '127.0.0.1', () => {
+  pushLog('操作台服务已启动：http://127.0.0.1:' + PORT + '/');
+  console.log('操作台服务已启动: http://127.0.0.1:' + PORT + '/');
+});
+process.on('exit', clearLock);
