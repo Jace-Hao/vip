@@ -188,19 +188,28 @@ async function runBatch(cdp, sample) {
   const jsonlPath = path.join(OUT_DIR, '.orders_results.jsonl');
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const doneUids = new Set();
+  const sigMap = new Map();
   if (fs.existsSync(jsonlPath)) {
     const age = Date.now() - fs.statSync(jsonlPath).mtimeMs;
     if (age > 20 * 3600 * 1000) fs.unlinkSync(jsonlPath);
     else {
       for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {
         if (!ln) continue;
-        try { const o = JSON.parse(ln); if (o && o.uid != null) doneUids.add(String(o.uid)); } catch (e) { /* ignore */ }
+        try { const o = JSON.parse(ln); if (o && o.uid != null) { doneUids.add(String(o.uid)); if (o.sig) sigMap.set(String(o.uid), o.sig); } } catch (e) { /* ignore */ }
       }
     }
   }
-  const todo = picked.filter((m) => !doneUids.has(String(m.uid)));
+  /* 增量比对：无记录或签名有变化的会员才重新抓取（会员数据任一字段变化都会改变签名） */
+  const todo = [];
+  let skipN = 0, newN = 0, chgN = 0;
+  for (const m of picked) {
+    const u = String(m.uid);
+    if (doneUids.has(u) && sigMap.get(u) === memberSig(m)) { skipN++; continue; }
+    if (doneUids.has(u)) chgN++; else newN++;
+    todo.push(m);
+  }
   const mode = picked.length >= members.length ? '全量' : '抽样';
-  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；已完成 ${doneUids.size} 人，本次需抓 ${todo.length} 人`);
+  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对：无需更新 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、有变化 ${chgN}）`);
   console.log('');
 
   const t0 = Date.now();
@@ -234,13 +243,14 @@ async function runBatch(cdp, sample) {
     await sleep(400);
   }
 
-  const all = [];
+  const byUid = new Map();
   if (fs.existsSync(jsonlPath)) {
     for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {
       if (!ln) continue;
-      try { const o = JSON.parse(ln); if (o && o.uid != null) all.push(o); } catch (e) { /* ignore */ }
+      try { const o = JSON.parse(ln); if (o && o.uid != null) byUid.set(String(o.uid), o); } catch (e) { /* ignore */ }
     }
   }
+  const all = Array.from(byUid.values());
   const ts = stamp();
   const label = picked.length >= members.length ? '全量' : `抽样${sample}`;
   const outPath = path.join(OUT_DIR, `会员订单_${label}_${ts}.json`);

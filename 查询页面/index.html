@@ -315,6 +315,10 @@
       s.onerror = function(){ (ORDER_PART_CBS[part]||[]).forEach(function(f){ try{ f('load'); }catch(e){} }); delete ORDER_PART_CBS[part]; };
       document.head.appendChild(s);
     }
+    function orderSummaryCardHtml(o){
+      var st = o.wstatus != null ? ('状态码 ' + o.wstatus) : '—';
+      return '<div class="o-card" style="background:#FFFDF6"><div class="o-hd" style="cursor:default"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span><span class="o-amt2">¥'+fmtYuan(o.trmb)+'</span><span class="o-dt2">'+esc(o.ctime||'')+'</span></div><div class="o-bd" style="display:block;border-top:1px dashed var(--line)"><div class="o-pay">该订单的完整详情（衣物/照片/支付）尚未抓取——重跑「导出会员数据(含详情).cmd」后自动补齐。</div></div></div>';
+    }
     function orderCardHtml(o){
       var d = (o.detail && o.detail.data) || {};
       var garments = (o.detail && o.detail.detail) || [];
@@ -497,8 +501,15 @@
                 if(stEl2) stEl2.innerHTML = '订单数据加载失败（请重试或重新打开页面）';
                 return;
               }
-              if(stEl2) stEl2.innerHTML = '共 <b>' + rec.orders.length + '</b> 笔订单' + (rec.orders.length ? '（点击订单可展开衣物与照片）' : '');
-              if(box2){ box2.innerHTML = rec.orders.map(function(o){ return orderCardHtml(o); }).join(''); bindOrderCards(box2); }
+              /* 合并：缓存中的完整订单 + 详情接口里尚未入库的新订单（标注“详情待补抓”） */
+              var items = []; var have = {};
+              rec.orders.forEach(function(o){ have[String(o.orderid)] = 1; items.push({ t: 'full', o: o, ctime: ((o.detail && o.detail.data && o.detail.data.ctime) || '') }); });
+              if(d && d.order && d.order.list){ d.order.list.forEach(function(o){ if(o && o.orderid != null && !have[String(o.orderid)]) items.push({ t: 'sum', o: o, ctime: (o.ctime || '') }); }); }
+              items.sort(function(a, b){ return (b.ctime || '').localeCompare(a.ctime || ''); });
+              var pending = 0;
+              var cards = items.map(function(x){ if(x.t === 'full') return orderCardHtml(x.o); pending++; return orderSummaryCardHtml(x.o); });
+              if(stEl2) stEl2.innerHTML = '共 <b>' + items.length + '</b> 笔订单' + (items.length ? '（点击订单可展开衣物与照片）' : '') + (pending ? ' · ' + pending + ' 笔详情待补抓' : '');
+              if(box2){ box2.innerHTML = cards.join(''); bindOrderCards(box2); }
             });
           } else {
             if(dRef && dRef.order && dRef.order.list && dRef.order.list.length){
