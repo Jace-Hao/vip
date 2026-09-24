@@ -9,24 +9,48 @@
  *
  * 只读操作：仅调用查询接口，不修改任何数据。
  * 用法：node fetch_orders.mjs --uid=25190368 [--out=目录] [--no-html]
+ *       node fetch_orders.mjs --sample=50   （批量抽样：均匀抽取 N 个有订单的会员）
+ *       node fetch_orders.mjs --all         （全量：所有有订单的会员）
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const CDP_BASE = 'http://127.0.0.1:9222';
 
 let UID = '';
+let SAMPLE = 0;
 let OUT_DIR = path.join(ROOT, '导出结果', '订单数据');
 let MAKE_HTML = true;
 for (const a of process.argv.slice(2)) {
   if (a.startsWith('--uid=')) UID = String(a.slice('--uid='.length)).trim();
+  else if (a.startsWith('--sample=')) SAMPLE = Math.max(1, parseInt(a.slice('--sample='.length), 10) || 0);
+  else if (a === '--all') SAMPLE = 1000000000;
   else if (a.startsWith('--out=')) OUT_DIR = path.resolve(a.slice('--out='.length));
   else if (a === '--no-html') MAKE_HTML = false;
 }
-if (!UID) { console.error('用法: node fetch_orders.mjs --uid=<会员ID> [--out=目录] [--no-html]'); process.exit(1); }
+if (!UID && SAMPLE <= 0) { console.error('用法: node fetch_orders.mjs --uid=<会员ID> 或 --sample=<N> [--out=目录] [--no-html]'); process.exit(1); }
+
+function memberSig(m) {
+  const o = {};
+  for (const k of Object.keys(m).sort()) {
+    if (k === 'ip') continue;
+    o[k] = m[k];
+  }
+  return createHash('md5').update(JSON.stringify(o)).digest('hex');
+}
+
+async function waitLong(seconds, reason) {
+  console.log(`      [提示] ${reason}；等待 ${seconds} 秒后自动继续...`);
+  const step = 60;
+  for (let waited = 0; waited < seconds; waited += step) {
+    await sleep(Math.min(step, seconds - waited) * 1000);
+    if (waited + step < seconds) console.log(`        已等待 ${waited + step} 秒 / ${seconds} 秒 ...`);
+  }
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function stamp() { const d = new Date(), p = (x) => String(x).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
@@ -105,12 +129,141 @@ async function callApi(cdp, params, tmo = 20000) {
   return r;
 }
 
+/* ---------------- 批量模式（抽样/全量） ---------------- */
+function loadMembersFromExport() {
+  const dir = path.join(ROOT, '导出结果');
+  const files = fs.readdirSync(dir).filter((f) => f.startsWith('会员导出_') && f.endsWith('.json')).sort();
+  if (!files.length) throw new Error('未找到会员导出数据（会员导出_*.json），请先在工具里完成一次导出。');
+  const j = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8'));
+  const keys = (j.fullHeaders || []).map((h) => { const m = /（([^（）]+)）\s*$/.exec(h); return m ? m[1] : h; });
+  const list = [];
+  for (const r of (j.fullRows || [])) {
+    const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
+    if (o.uid != null) list.push(o);
+  }
+  return list;
+}
+
+async function fetchMemberOrders(cdp, m) {
+  const uid = Number(m.uid);
+  const size = 100;
+  let start = 0, orders = [], total = null;
+  for (;;) {
+    const r = await callApi(cdp, { act: 'searchwashorders', uid, start, size, currentPage: Math.floor(start / size) + 1, currenQuantity: size });
+    if (total === null) total = Number(r.total) || 0;
+    const rows = r.data || [];
+    orders = orders.concat(rows);
+    if (orders.length >= total || rows.length < size) break;
+    start += size;
+    await sleep(350);
+  }
+  const details = [];
+  let failedOrders = 0;
+  for (const row of orders) {
+    let ok = false;
+    for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+      try {
+        const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
+        details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
+        ok = true;
+      } catch (e) {
+        if (attempt < 3) {
+          console.log(`      订单 ${row.sncode} 取数失败（${e.message}），重试 ${attempt}/3 ...`);
+          await sleep(1500 * attempt);
+        }
+      }
+    }
+    if (!ok) failedOrders++;
+    await sleep(300);
+  }
+  return { orders: details, failedOrders };
+}
+
+async function runBatch(cdp, sample) {
+  const members = loadMembersFromExport().filter((m) => Number(m.onum) > 0);
+  const stride = Math.max(1, Math.floor(members.length / sample));
+  const picked = [];
+  for (let i = 0; i < members.length && picked.length < sample; i += stride) picked.push(members[i]);
+
+  const jsonlPath = path.join(OUT_DIR, '.orders_results.jsonl');
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  const doneUids = new Set();
+  if (fs.existsSync(jsonlPath)) {
+    const age = Date.now() - fs.statSync(jsonlPath).mtimeMs;
+    if (age > 20 * 3600 * 1000) fs.unlinkSync(jsonlPath);
+    else {
+      for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {
+        if (!ln) continue;
+        try { const o = JSON.parse(ln); if (o && o.uid != null) doneUids.add(String(o.uid)); } catch (e) { /* ignore */ }
+      }
+    }
+  }
+  const todo = picked.filter((m) => !doneUids.has(String(m.uid)));
+  const mode = picked.length >= members.length ? '全量' : '抽样';
+  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；已完成 ${doneUids.size} 人，本次需抓 ${todo.length} 人`);
+  console.log('');
+
+  const t0 = Date.now();
+  let okCount = 0, failCount = 0, orderTotal = 0, consecutiveFail = 0;
+  for (let i = 0; i < todo.length; i++) {
+    const m = todo[i];
+    const uid = String(m.uid);
+    try {
+      const ok = await cdp.evaluate('(function(){ try { return !!((localStorage.getItem("code")||"").length); } catch(e){ return true; } })()', 5000);
+      if (ok === false) { console.log('  [重要] 登录状态已失效，停止（已抓数据均保留，重新登录后重跑可续传）。'); break; }
+    } catch (e) { /* ignore */ }
+    const mStart = Date.now();
+    let result = null, lastErr = null;
+    for (let attempt = 1; attempt <= 2 && !result; attempt++) {
+      try { result = await fetchMemberOrders(cdp, m); }
+      catch (e) {
+        lastErr = e;
+        if (attempt < 2) await waitLong(180, `${m.name || uid} 抓取失败（${e.message}）`);
+      }
+    }
+    if (!result) {
+      failCount++; consecutiveFail++;
+      console.log(`  [${i + 1}/${todo.length}] ${m.name || uid} 抓取失败：${(lastErr && lastErr.message) || ''}`);
+      if (consecutiveFail >= 4) { console.log('  连续失败过多，提前停止（稍后重跑可续传）。'); break; }
+      continue;
+    }
+    consecutiveFail = 0; okCount++; orderTotal += result.orders.length;
+    const mSec = Math.round((Date.now() - mStart) / 1000);
+    fs.appendFileSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, orders: result.orders }) + '\n', 'utf8');
+    console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
+    await sleep(400);
+  }
+
+  const all = [];
+  if (fs.existsSync(jsonlPath)) {
+    for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {
+      if (!ln) continue;
+      try { const o = JSON.parse(ln); if (o && o.uid != null) all.push(o); } catch (e) { /* ignore */ }
+    }
+  }
+  const ts = stamp();
+  const label = picked.length >= members.length ? '全量' : `抽样${sample}`;
+  const outPath = path.join(OUT_DIR, `会员订单_${label}_${ts}.json`);
+  const totalOrders = all.reduce((a, x) => a + (x.orders ? x.orders.length : 0), 0);
+  fs.writeFileSync(outPath, JSON.stringify({ tool: '洗衣管家订单抓取(批量)', fetchedAt: new Date().toISOString(), memberCount: all.length, orderCount: totalOrders, members: all }), 'utf8');
+
+  const elapsed = (Date.now() - t0) / 1000;
+  console.log('');
+  console.log(`  本次成功 ${okCount} 人 / 失败 ${failCount} 人；累计已抓 ${all.length} 人、${totalOrders} 单`);
+  console.log(`  本次耗时 ${Math.round(elapsed)} 秒；合并文件：${outPath}`);
+  const remaining = members.length - all.length;
+  if (okCount > 0 && remaining > 0) {
+    const per = elapsed / okCount;
+    console.log(`  按本次速率估算：剩余 ${remaining} 人约需 ${Math.round(remaining * per / 60)} 分钟`);
+  }
+}
+
 /* ---------------- 主流程 ---------------- */
 async function main() {
   console.log('==================================================');
   console.log('   洗衣管家 · 会员订单数据抓取（试点）');
   console.log('==================================================');
-  console.log('会员ID:', UID);
+  if (UID) console.log('会员ID:', UID); else console.log(SAMPLE >= 1000000 ? '模式：全量抓取（全部有订单的会员）' : `抽样数量: ${SAMPLE}`);
 
   const target = await findTarget();
   const cdp = new CDP(target.webSocketDebuggerUrl);
@@ -119,6 +272,13 @@ async function main() {
   const envRaw = await cdp.evaluate(`(function(){ var u = {}; try { u = JSON.parse(localStorage.getItem('user')||'{}'); } catch(e){} return JSON.stringify({ uid: u.uid||0, href: location.href }); })()`, 10000);
   const env = JSON.parse(envRaw);
   if (!env.uid || /#\/(login|loginucc)/.test(env.href)) { console.error('[错误] 洗衣管家当前未登录，请先登录后再试。'); process.exit(1); }
+
+  if (!UID) {
+    await runBatch(cdp, SAMPLE);
+    cdp.close();
+    setTimeout(() => process.exit(0), 300);
+    return;
+  }
 
   /* 1) 订单列表（分页拉全） */
   const size = 100;
