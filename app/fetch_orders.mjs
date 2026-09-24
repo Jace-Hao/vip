@@ -229,7 +229,7 @@ async function runBatch(cdp, sample) {
   const incompleteUids = new Set();
   if (fs.existsSync(jsonlPath)) {
     const age = Date.now() - fs.statSync(jsonlPath).mtimeMs;
-    if (age > 20 * 3600 * 1000) fs.unlinkSync(jsonlPath);
+    if (age > 7 * 24 * 3600 * 1000) fs.unlinkSync(jsonlPath);
     else {
       const lastByUid = new Map();
       for (const ln of fs.readFileSync(jsonlPath, 'utf8').split(/\r?\n/)) {

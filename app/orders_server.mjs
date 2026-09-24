@@ -56,6 +56,8 @@ let schedule = { enabled: false, time: '23:00', shutdownAfter: false, lastFiredD
 let shutdownPending = null;    // { since } 自动关机倒计时
 let scheduleTriggered = false; // 当前抓取是否由定时同步触发
 let schedBusy = false;
+let lastCleanup = null;  // { at, atText, removed }
+const KEEP_RUNS = 2;     // 自动清理保留的最近导出/抓取次数
 
 function nowStr() { const d = new Date(), p = (x) => String(x).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
 function pushLog(line) { logBuf.push(nowStr() + '  ' + line); if (logBuf.length > LOG_MAX) logBuf.splice(0, logBuf.length - LOG_MAX); }
@@ -166,6 +168,65 @@ async function schedulerTick() {
   } finally { schedBusy = false; }
 }
 
+/* ---------------- 自动清理过时数据（保留最近 KEEP_RUNS 次） ---------------- */
+function collectStamped(dir, prefixes) {
+  const map = new Map();
+  try {
+    if (!fs.existsSync(dir)) return map;
+    for (const f of fs.readdirSync(dir)) {
+      if (f.startsWith('.')) continue;
+      if (!prefixes.some((p) => f.startsWith(p))) continue;
+      const m = /_(\d{8}_\d{6})\./.exec(f);
+      if (!m) continue;
+      const full = path.join(dir, f);
+      let st; try { st = fs.statSync(full); } catch (e) { continue; }
+      if (!st.isFile()) continue;
+      if (!map.has(m[1])) map.set(m[1], []);
+      map.get(m[1]).push(full);
+    }
+  } catch (e) { /* ignore */ }
+  return map;
+}
+
+function recycleFiles(files) {
+  return new Promise((resolve) => {
+    if (!files.length) return resolve(0);
+    const script = 'Add-Type -AssemblyName Microsoft.VisualBasic; ' +
+      files.map((f) => `[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('${f.replace(/'/g, "''")}', 'OnlyErrorDialogs', 'SendToRecycleBin')`).join('; ');
+    const ch = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore' });
+    ch.on('exit', (c) => resolve(c === 0 ? files.length : 0));
+    ch.on('error', () => resolve(0));
+  });
+}
+
+async function cleanupOldData() {
+  try {
+    const scopes = [
+      { dir: path.join(ROOT, '导出结果'), prefixes: ['会员导出_', '会员全量数据_', '会员详情_'] },
+      { dir: OUT_DIR, prefixes: ['订单_', '订单试点预览_', '会员订单_'] },
+    ];
+    let total = 0;
+    for (const sc of scopes) {
+      const map = collectStamped(sc.dir, sc.prefixes);
+      const stamps = [...map.keys()].sort().reverse();
+      const dead = [];
+      for (const s of stamps.slice(KEEP_RUNS)) dead.push(...map.get(s));
+      /* 被占用的文件自动跳过（如正在打开的 Excel） */
+      const deletable = [];
+      for (const f of dead) { try { const fd = fs.openSync(f, 'r+'); fs.closeSync(fd); deletable.push(f); } catch (e) { /* 跳过 */ } }
+      if (deletable.length) total += await recycleFiles(deletable);
+    }
+    lastCleanup = { at: Date.now(), atText: nowStr(), removed: total };
+    pushLog(total > 0
+      ? `🧹 已自动清理过时数据：移除 ${total} 个旧文件（保留最近 ${KEEP_RUNS} 次，已移入回收站可恢复）`
+      : `🧹 数据检查完成：无需清理（各保留最近 ${KEEP_RUNS} 次导出/抓取）。`);
+    return total;
+  } catch (e) {
+    pushLog('[警告] 数据清理出错：' + e.message);
+    return 0;
+  }
+}
+
 /* ---------------- 子进程管理 ---------------- */
 function wireChild(ch) {
   let buf = '';
@@ -219,9 +280,11 @@ function spawnPhase(kind) {
       clearLock();
       const wantShutdown = scheduleTriggered && schedule.shutdownAfter;
       scheduleTriggered = false;
-      const r2 = rebuild(wantShutdown);
-      if (r2 && r2.ok) pushLog('正在自动刷新查询页面数据...');
-      else if (wantShutdown) doShutdown();
+      cleanupOldData().then(() => {
+        const r2 = rebuild(wantShutdown);
+        if (r2 && r2.ok) pushLog('正在自动刷新查询页面数据...');
+        else if (wantShutdown) doShutdown();
+      });
     }
   });
 }
@@ -293,6 +356,7 @@ async function statusPayload() {
     cdp: await cdpCheck(),
     rebuilding,
     schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate },
+    lastCleanup,
     shutdownPendingSecs: shutdownPending ? Math.max(0, SHUTDOWN_DELAY - Math.round((Date.now() - shutdownPending.since) / 1000)) : 0,
     serverPort: PORT,
     logTail: logBuf.slice(-25),
@@ -350,6 +414,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && p === '/api/cancel_shutdown') { sendJson(res, cancelShutdown()); return; }
     if (req.method === 'POST' && p === '/api/rebuild') { sendJson(res, rebuild()); return; }
+    if (req.method === 'POST' && p === '/api/cleanup') { cleanupOldData().then((n) => sendJson(res, { ok: true, removed: n })); return; }
     if (req.method === 'POST' && p === '/api/open') {
       const body = await readBody(req);
       const what = body.what === 'folder' ? path.join(ROOT, '导出结果', '订单数据') : path.join(ROOT, '查询页面', 'index.html');
@@ -366,6 +431,7 @@ const server = http.createServer(async (req, res) => {
 /* ---------------- 启动 ---------------- */
 loadSchedule();
 setInterval(() => { schedulerTick().catch((e) => { schedBusy = false; pushLog('[错误] 定时任务异常：' + e.message); }); }, 20000);
+setTimeout(() => { cleanupOldData(); }, 8000); // 启动后自动检查一次过时数据
 baseStats = loadBaseStats();
 const js0 = readJsonlStats();
 baseDone = js0.members; baseOrders = js0.orders;

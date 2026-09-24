@@ -70,6 +70,7 @@
       <button id="btnStart">开始抓取</button>
       <button id="btnPause" disabled>暂停</button>
       <button class="btn2" id="btnRebuild">刷新查询页数据</button>
+      <button class="btn2" id="btnCleanup">清理过时数据</button>
       <button class="btn2" id="btnViewer">打开查询页面</button>
       <button class="btn2" id="btnFolder">打开数据文件夹</button>
     </div>
@@ -106,6 +107,7 @@
       <li>全部完成后：双击「打开会员查询页面.cmd」即可在查询台中查看所有会员的完整订单。</li>
       <li>若提示调试端口不可用：请完全退出洗衣管家，双击工具目录里的「以调试模式启动洗衣管家.cmd」后再开始。</li>
       <li><strong>定时同步</strong>：在上方设置每天自动抓取的时间，可勾选「同步完成后自动关机」实现夜间全自动（抓取→刷新查询页→关机）。</li>
+      <li><strong>自动清理</strong>：每次抓取完成或服务启动时，自动把导出/抓取文件<strong>保留最近 2 次</strong>，更早的移入回收站（可找回）；被占用的文件会自动跳过。</li>
     </ul>
   </div>
 </div>
@@ -169,6 +171,7 @@
     if (s.exportStamp) chips.push('<span class="chip">数据时间：' + s.exportStamp + '</span>');
     if (st.schedule && st.schedule.enabled) chips.push('<span class="chip">定时同步 <b>每天 ' + st.schedule.time + '</b>' + (st.schedule.shutdownAfter ? ' · 同步后关机' : '') + '</span>');
     else chips.push('<span class="chip">定时同步 <b>未启用</b></span>');
+    if (st.lastCleanup) chips.push('<span class="chip">自动清理 <b>移除 ' + st.lastCleanup.removed + ' 个</b> · ' + (st.lastCleanup.atText || '') + '</span>');
     $('#chips').innerHTML = chips.join('');
 
     // 关机倒计时提示
@@ -191,6 +194,7 @@
     bs.textContent = (st.phase === 'paused' || (s.doneMembers > 0 && !st.running)) ? '继续抓取' : '开始抓取';
     $('#btnPause').disabled = !st.running;
     $('#btnRebuild').disabled = !!st.running || !!st.rebuilding;
+  $('#btnCleanup').disabled = !!st.running;
   }
 
   function poll(){
@@ -224,6 +228,15 @@
     api('/api/rebuild', 'POST').then(function(){ toast('查询页数据已刷新'); b.disabled = false; b.textContent = '刷新查询页数据'; poll(); });
   });
   $('#btnViewer').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'viewer' }); });
+  $('#btnCleanup').addEventListener('click', function(){
+    var b = this; b.disabled = true; b.textContent = '清理中…';
+    api('/api/cleanup', 'POST').then(function(r){
+      b.disabled = false; b.textContent = '清理过时数据';
+      var n = r.j && r.j.removed;
+      toast(n > 0 ? ('已移除 ' + n + ' 个过时文件（可在回收站找回）') : '无需清理，数据已是最新两次');
+      poll();
+    }).catch(function(){ b.disabled = false; b.textContent = '清理过时数据'; toast('清理失败'); });
+  });
   $('#btnFolder').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'folder' }); });
 
   // 定时同步设置
