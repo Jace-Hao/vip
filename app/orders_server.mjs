@@ -10,6 +10,9 @@
  *   POST /api/stop    暂停（停止进程，进度保留，可继续）
  *   POST /api/rebuild 刷新查询页面数据
  *   POST /api/open    打开查询页面 / 数据文件夹
+ *   GET  /api/schedule        查询定时同步设置
+ *   POST /api/schedule        保存定时同步设置 {"enabled":true,"time":"23:00","shutdownAfter":true}
+ *   POST /api/cancel_shutdown 取消待执行的自动关机
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,6 +28,9 @@ const PAGE_FILE = path.join(ROOT, '操作页面.html');
 const LOCK_PATH = path.join(OUT_DIR, '.orders_run.lock');
 const JSONL_PATH = path.join(OUT_DIR, '.orders_results.jsonl');
 const LOG_MAX = 500;
+const SCHEDULE_FILE = path.join(ROOT, '.sync_schedule.json');
+const APP_EXE = 'D:\\Blending_Release-6.1.17\\xygjwinapp.exe';
+const SHUTDOWN_DELAY = 120; // 同步完成后延迟关机秒数（期间可取消）
 
 let child = null;
 let childKind = null; // deep | orders
@@ -46,6 +52,10 @@ let state = {
   totalWithOrders: null,
   ordersThisRun: 0,
 };
+let schedule = { enabled: false, time: '23:00', shutdownAfter: false, lastFiredDate: '' };
+let shutdownPending = null;    // { since } 自动关机倒计时
+let scheduleTriggered = false; // 当前抓取是否由定时同步触发
+let schedBusy = false;
 
 function nowStr() { const d = new Date(), p = (x) => String(x).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
 function pushLog(line) { logBuf.push(nowStr() + '  ' + line); if (logBuf.length > LOG_MAX) logBuf.splice(0, logBuf.length - LOG_MAX); }
@@ -77,6 +87,77 @@ function loadBaseStats() {
     }
     return { members: (j.fullRows || []).length, withOrders, ordersSum, exportStamp: (j.exportStamp || '') };
   } catch (e) { return null; }
+}
+
+/* ---------------- 定时同步 & 自动关机 ---------------- */
+function todayStr() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function loadSchedule() {
+  try {
+    if (fs.existsSync(SCHEDULE_FILE)) {
+      const j = JSON.parse(fs.readFileSync(SCHEDULE_FILE, 'utf8'));
+      if (j && typeof j === 'object') schedule = { enabled: !!j.enabled, time: /^\d{1,2}:\d{2}$/.test(j.time || '') ? j.time : '23:00', shutdownAfter: !!j.shutdownAfter, lastFiredDate: j.lastFiredDate || '' };
+    }
+  } catch (e) { /* ignore */ }
+}
+function saveSchedule() { try { fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedule, null, 2), 'utf8'); } catch (e) { pushLog('[警告] 定时设置保存失败：' + e.message); } }
+
+async function cdpOk(timeoutMs) {
+  try { await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(timeoutMs || 2000) }); return true; } catch (e) { return false; }
+}
+
+/* 确保洗衣管家以调试模式运行；必要时自动重启软件 */
+async function ensureDebugApp() {
+  if (await cdpOk()) return true;
+  pushLog('调试端口未就绪，自动重启洗衣管家（调试模式）...');
+  await new Promise((resolve) => { const ch = spawn('taskkill', ['/F', '/IM', 'xygjwinapp.exe'], { stdio: 'ignore' }); ch.on('exit', resolve); ch.on('error', resolve); });
+  await new Promise((r) => setTimeout(r, 2000));
+  if (!fs.existsSync(APP_EXE)) { pushLog('[错误] 找不到洗衣管家主程序：' + APP_EXE); return false; }
+  try { spawn('cmd.exe', ['/c', 'start', '', APP_EXE, '--remote-debugging-port=9222'], { cwd: path.dirname(APP_EXE), stdio: 'ignore', detached: true }); } catch (e) { pushLog('[错误] 启动洗衣管家失败：' + e.message); return false; }
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (await cdpOk(1500)) { pushLog('洗衣管家已进入调试模式。'); return true; }
+  }
+  pushLog('[错误] 等待洗衣管家调试端口超时（90 秒）。');
+  return false;
+}
+
+function doShutdown() {
+  if (shutdownPending) return;
+  shutdownPending = { since: Date.now() };
+  pushLog('⚡ 同步完成：系统将在 ' + SHUTDOWN_DELAY + ' 秒后自动关机（可在本页面点「取消关机」）。');
+  try { const ch = spawn('shutdown', ['/s', '/t', String(SHUTDOWN_DELAY), '/c', '订单数据同步完成，系统即将关机'], { stdio: 'ignore', detached: true }); ch.on('error', () => {}); } catch (e) { pushLog('[错误] 关机命令执行失败：' + e.message); shutdownPending = null; }
+}
+
+function cancelShutdown() {
+  if (!shutdownPending) return { error: '当前没有待执行的关机' };
+  try { const ch = spawn('shutdown', ['/a'], { stdio: 'ignore' }); ch.on('error', () => {}); } catch (e) { /* ignore */ }
+  shutdownPending = null;
+  pushLog('已取消自动关机。');
+  return { ok: true };
+}
+
+async function schedulerTick() {
+  if (!schedule.enabled || schedBusy || shutdownPending) return;
+  if (child || rebuilding) return;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(schedule.time || '');
+  if (!m) return;
+  const now = new Date();
+  const fire = new Date(now.getFullYear(), now.getMonth(), now.getDate(), +m[1], +m[2], 0);
+  const diff = now - fire;
+  if (diff < 0 || diff > 10 * 60 * 1000) return; // 未到时间 / 错过超过10分钟（次日再触发）
+  const today = todayStr();
+  if (schedule.lastFiredDate === today) return;
+  schedule.lastFiredDate = today; saveSchedule();
+  schedBusy = true;
+  pushLog('⏰ 定时同步触发（每天 ' + schedule.time + (schedule.shutdownAfter ? ' · 同步后自动关机' : '') + '）');
+  try {
+    if (fs.existsSync(LOCK_PATH)) { pushLog('检测到已有抓取任务在运行，本次定时同步跳过。'); return; }
+    const ok = await ensureDebugApp();
+    if (!ok) { pushLog('本次定时同步取消（不执行关机）。'); return; }
+    scheduleTriggered = true;
+    const r = start(0);
+    if (r && r.error) { scheduleTriggered = false; pushLog('定时同步启动失败：' + r.error); }
+  } finally { schedBusy = false; }
 }
 
 /* ---------------- 子进程管理 ---------------- */
@@ -121,15 +202,20 @@ function spawnPhase(kind) {
   wireChild(child);
   child.on('exit', (code) => {
     child = null;
-    if (stopReq) { phase = 'paused'; pushLog('已暂停（进度保留，点击“开始/继续”可续传）'); clearLock(); stopReq = false; return; }
+    if (stopReq) { phase = 'paused'; pushLog('已暂停（进度保留，点击“开始/继续”可续传）'); clearLock(); stopReq = false; scheduleTriggered = false; return; }
     if (childKind === 'deep') {
       if (code === 0) { pushLog('会员详情增量更新完成，继续订单抓取...'); spawnPhase('orders'); }
-      else { phase = 'failed'; lastExit = { kind: 'deep', code }; pushLog('会员详情更新异常退出（代码 ' + code + '），已停止。'); clearLock(); }
+      else { phase = 'failed'; lastExit = { kind: 'deep', code }; scheduleTriggered = false; pushLog('会员详情更新异常退出（代码 ' + code + '），已停止。'); clearLock(); }
     } else {
       phase = code === 0 ? 'done' : 'failed';
       lastExit = { kind: 'orders', code };
       pushLog(code === 0 ? '订单抓取完成。' : ('订单抓取进程退出（代码 ' + code + '）'));
       clearLock();
+      const wantShutdown = scheduleTriggered && schedule.shutdownAfter;
+      scheduleTriggered = false;
+      const r2 = rebuild(wantShutdown);
+      if (r2 && r2.ok) pushLog('正在自动刷新查询页面数据...');
+      else if (wantShutdown) doShutdown();
     }
   });
 }
@@ -155,13 +241,17 @@ function stop() {
   return { ok: true };
 }
 
-function rebuild() {
+function rebuild(thenShutdown) {
   if (rebuilding) return { error: '正在生成中，请稍候' };
   const py = path.join(process.env.LOCALAPPDATA || '', 'Python', 'bin', 'python.exe');
   const exe = fs.existsSync(py) ? py : 'python';
   rebuilding = true;
   const ch = spawn(exe, ['app/build_viewer.py'], { cwd: ROOT, stdio: 'ignore' });
-  ch.on('exit', (code) => { rebuilding = false; pushLog(code === 0 ? '查询页面数据已刷新' : '查询页面数据刷新失败'); });
+  ch.on('exit', (code) => {
+    rebuilding = false;
+    pushLog(code === 0 ? '查询页面数据已刷新' : '查询页面数据刷新失败');
+    if (thenShutdown) doShutdown();
+  });
   return { ok: true };
 }
 
@@ -196,6 +286,8 @@ async function statusPayload() {
     },
     cdp: await cdpCheck(),
     rebuilding,
+    schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate },
+    shutdownPendingSecs: shutdownPending ? Math.max(0, SHUTDOWN_DELAY - Math.round((Date.now() - shutdownPending.since) / 1000)) : 0,
     serverPort: PORT,
     logTail: logBuf.slice(-25),
   };
@@ -237,6 +329,20 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'POST' && p === '/api/stop') { const r = stop(); sendJson(res, r, r.ok ? 200 : 409); return; }
+    if (req.method === 'GET' && p === '/api/schedule') { sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } }); return; }
+    if (req.method === 'POST' && p === '/api/schedule') {
+      const body = await readBody(req);
+      const t = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(String(body.time || ''));
+      if (!t || +t[1] > 23 || +t[2] > 59) { sendJson(res, { error: '时间格式应为 HH:MM（如 23:00）' }, 400); return; }
+      schedule.enabled = !!body.enabled;
+      schedule.time = String(+t[1]).padStart(2, '0') + ':' + t[2];
+      schedule.shutdownAfter = !!body.shutdownAfter;
+      saveSchedule();
+      pushLog('定时同步设置已保存：' + (schedule.enabled ? ('每天 ' + schedule.time + (schedule.shutdownAfter ? '，同步后自动关机' : '')) : '已停用'));
+      sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/cancel_shutdown') { sendJson(res, cancelShutdown()); return; }
     if (req.method === 'POST' && p === '/api/rebuild') { sendJson(res, rebuild()); return; }
     if (req.method === 'POST' && p === '/api/open') {
       const body = await readBody(req);
@@ -252,6 +358,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 /* ---------------- 启动 ---------------- */
+loadSchedule();
+setInterval(() => { schedulerTick().catch((e) => { schedBusy = false; pushLog('[错误] 定时任务异常：' + e.message); }); }, 20000);
 baseStats = loadBaseStats();
 const js0 = readJsonlStats();
 baseDone = js0.members; baseOrders = js0.orders;

@@ -50,6 +50,10 @@
 </head>
 <body>
 <div class="wrap">
+  <div id="shutdownBanner" style="display:none;background:#fdecec;border:1px solid #f3caca;border-radius:12px;padding:12px 18px;margin-top:16px;color:#c94f4f;font-weight:700;align-items:center;gap:12px">
+    <span id="shutdownText" style="flex:1"></span>
+    <button class="btn2" id="btnCancelShutdown" style="color:#c94f4f;border-color:#f3caca">取消关机</button>
+  </div>
   <header>
     <h1>会员订单数据抓取 · 操作台</h1>
     <div class="sub">从洗衣管家抓取全部会员的订单详情（衣物 / 照片 / 支付 / 状态）· 全程只读 · 断点续传</div>
@@ -71,6 +75,23 @@
     </div>
   </div>
 
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+      <strong style="font-size:15.5px">⏰ 定时同步</strong>
+      <span class="help" id="schedState">读取中…</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-top:12px">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="schEnabled"> 每天定时运行</label>
+      <label style="display:flex;align-items:center;gap:6px">时间 <input type="time" id="schTime" value="23:00" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px"></label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="schShutdown"> 同步完成后自动关机</label>
+      <button class="btn2" id="btnSaveSched">保存设置</button>
+    </div>
+    <div class="help" style="margin-top:10px">
+      到点自动执行「会员详情增量 + 全部订单抓取」，完成后自动刷新查询页数据；若洗衣管家未开启或未开调试端口，会自动以调试模式重启软件。
+      勾选自动关机时：同步完成后约 2 分钟自动关机（期间页面顶部出现红色提示条，可点击取消）。建议把时间设在打烊后（如 23:00），避免影响营业。
+    </div>
+  </div>
+
   <div class="logcard">
     <div class="log-head"><span>运行日志（实时）</span><span id="logMeta"></span></div>
     <pre id="log">—</pre>
@@ -84,6 +105,7 @@
       <li>抓取期间请保持洗衣管家开启并已登录；本页面可以关闭，服务在后台继续运行（地址 <code>http://127.0.0.1:8791</code>）。</li>
       <li>全部完成后：双击「打开会员查询页面.cmd」即可在查询台中查看所有会员的完整订单。</li>
       <li>若提示调试端口不可用：请完全退出洗衣管家，双击工具目录里的「以调试模式启动洗衣管家.cmd」后再开始。</li>
+      <li><strong>定时同步</strong>：在上方设置每天自动抓取的时间，可勾选「同步完成后自动关机」实现夜间全自动（抓取→刷新查询页→关机）。</li>
     </ul>
   </div>
 </div>
@@ -145,7 +167,16 @@
     chips.push(st.cdp === 'ok' ? '<span class="chip">调试端口 <b>正常</b></span>' : '<span class="chip bad">调试端口不可用 — 需以调试模式重启洗衣管家</span>');
     if (st.compare) chips.push('<span class="chip">比对：无需更新 <b>' + st.compare.skip + '</b> · 需抓取 <b>' + st.compare.fetch + '</b></span>');
     if (s.exportStamp) chips.push('<span class="chip">数据时间：' + s.exportStamp + '</span>');
+    if (st.schedule && st.schedule.enabled) chips.push('<span class="chip">定时同步 <b>每天 ' + st.schedule.time + '</b>' + (st.schedule.shutdownAfter ? ' · 同步后关机' : '') + '</span>');
+    else chips.push('<span class="chip">定时同步 <b>未启用</b></span>');
     $('#chips').innerHTML = chips.join('');
+
+    // 关机倒计时提示
+    var sb = $('#shutdownBanner');
+    if (st.shutdownPendingSecs > 0) {
+      sb.style.display = 'flex';
+      $('#shutdownText').textContent = '同步完成 — 系统将在约 ' + st.shutdownPendingSecs + ' 秒后自动关机。如需继续使用电脑，请点击取消关机。';
+    } else { sb.style.display = 'none'; }
 
     // 日志
     var log = $('#log');
@@ -194,6 +225,38 @@
   });
   $('#btnViewer').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'viewer' }); });
   $('#btnFolder').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'folder' }); });
+
+  // 定时同步设置
+  function schedStateText(s){
+    $('#schedState').textContent = s.enabled ? ('已启用：每天 ' + s.time + (s.shutdownAfter ? ' · 同步后自动关机' : '')) : '未启用';
+  }
+  function loadSched(){
+    api('/api/schedule').then(function(r){
+      var s = r.j && r.j.schedule; if (!s) return;
+      $('#schEnabled').checked = !!s.enabled;
+      $('#schTime').value = s.time || '23:00';
+      $('#schShutdown').checked = !!s.shutdownAfter;
+      schedStateText(s);
+    }).catch(function(){ $('#schedState').textContent = '读取失败'; });
+  }
+  $('#btnSaveSched').addEventListener('click', function(){
+    var body = { enabled: $('#schEnabled').checked, time: $('#schTime').value || '23:00', shutdownAfter: $('#schShutdown').checked };
+    var b = this; b.disabled = true;
+    api('/api/schedule', 'POST', body).then(function(r){
+      b.disabled = false;
+      if (r.j && r.j.error) { toast(r.j.error); return; }
+      if (r.j && r.j.schedule) schedStateText(r.j.schedule);
+      toast(body.enabled ? '已保存：每天 ' + r.j.schedule.time + (r.j.schedule.shutdownAfter ? '，同步后自动关机' : '') : '定时同步已停用');
+      poll();
+    }).catch(function(){ b.disabled = false; toast('保存失败'); });
+  });
+  $('#btnCancelShutdown').addEventListener('click', function(){
+    api('/api/cancel_shutdown', 'POST').then(function(r){
+      toast(r.j && r.j.ok ? '已取消自动关机' : (r.j && r.j.error) || '操作失败');
+      poll();
+    });
+  });
+  loadSched();
 
   poll();
   setInterval(poll, 2000);
