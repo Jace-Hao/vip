@@ -85,6 +85,24 @@
   .ordtable{width:100%;font-size:12.5px}
   .ordtable th{position:static;background:#F7FAFF;padding:6px 8px;border-bottom:1px solid var(--line);color:#42536F;font-weight:600;white-space:nowrap}
   .ordtable td{padding:6px 8px;border-bottom:1px solid #F1F5FB;white-space:nowrap}
+  /* 订单卡片（分片懒加载区） */
+  .o-card{border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#FBFCFE}
+  .o-hd{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;padding:8px 11px;cursor:pointer}
+  .o-hd:hover{background:#F4F8FF}
+  .o-sn2{font-weight:700;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .o-st2{font-size:11.5px;border:1px solid var(--line);border-radius:3px;padding:0 6px;color:var(--muted)}
+  .o-amt2{color:#E8720C;font-weight:700;margin-left:auto;font-variant-numeric:tabular-nums}
+  .o-dt2{color:var(--muted);font-size:12px;width:100%}
+  .o-tog{font-size:11.5px;color:var(--brand-ink)}
+  .o-bd{padding:4px 11px 10px;border-top:1px dashed var(--line)}
+  .o-gt{width:100%;font-size:12px}
+  .o-gt th{text-align:left;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);padding:3px 6px 3px 0}
+  .o-gt td{border-bottom:1px solid #F1F5FB;padding:3px 6px 3px 0;white-space:nowrap}
+  .o-ph{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
+  .o-ph figure{margin:0}
+  .o-ph img{width:72px;height:72px;object-fit:cover;border:1px solid var(--line);border-radius:3px;background:#eceff3;display:block}
+  .o-ph figcaption{font-size:10.5px;color:var(--muted);margin-top:2px;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .o-pay{font-size:12px;color:var(--muted);margin-top:4px}
   details.sys{margin:0;padding:12px 16px}
   details.sys summary{cursor:pointer;color:var(--brand-ink);font-weight:600;font-size:13px}
   details.sys .kv{margin-top:8px}
@@ -253,6 +271,7 @@
       m._det = details[m._uid]||null;
       var tag = (m._det&&m._det.tagname)||m.tagids||'';
       m._search = (m._name+' '+m._phone+' '+(m.py||'')+' '+(m.cardnum||'')+' '+(m.scode||'')+' '+tag+' '+(m.note||'')).toLowerCase();
+      if(D.orderSearch && D.orderSearch[m._uid]) m._search += ' ' + String(D.orderSearch[m._uid]).toLowerCase();
       if(m._det && m._det.order && m._det.order.list){
         var ids=m._det.order.list.map(function(o){return (o.orderid||'')+' '+(o.sncode||'');}).join(' ');
         m._search += ' '+ids.toLowerCase();
@@ -279,9 +298,58 @@
         '详情覆盖：'+detCount+' / '+members.length,
         '数据时间：'+esc((D.exportStamp||'').replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/,'$1-$2-$3 $4:$5:$6'))
       ];
+      if(D.orderMeta && D.orderMeta.covered) chips.push('订单数据：'+D.orderMeta.covered+' 人 / '+D.orderMeta.orders+' 单');
       if(D.softwareVersion) chips.push('软件版本：'+esc(D.softwareVersion));
-      document.getElementById('metaChips').innerHTML = chips.map(function(c){return '<span class="chip">'+c+'</span>';}).join('');
+      document.getElementById('metaChips').innerHTML = chips.filter(Boolean).map(function(c){return '<span class="chip">'+c+'</span>';}).join('');
     })();
+
+    /* ---------- 订单分片懒加载与订单卡片 ---------- */
+    var ORDER_PART_CBS = {};
+    function loadOrderPart(part, cb){
+      if(window.ORDER_PARTS && window.ORDER_PARTS[part]){ cb(null); return; }
+      if(ORDER_PART_CBS[part]){ ORDER_PART_CBS[part].push(cb); return; }
+      ORDER_PART_CBS[part] = [cb];
+      var s = document.createElement('script');
+      s.src = '订单分片/' + part + '.js';
+      s.onload = function(){ (ORDER_PART_CBS[part]||[]).forEach(function(f){ try{ f(null); }catch(e){} }); delete ORDER_PART_CBS[part]; };
+      s.onerror = function(){ (ORDER_PART_CBS[part]||[]).forEach(function(f){ try{ f('load'); }catch(e){} }); delete ORDER_PART_CBS[part]; };
+      document.head.appendChild(s);
+    }
+    function orderCardHtml(o){
+      var d = (o.detail && o.detail.data) || {};
+      var garments = (o.detail && o.detail.detail) || [];
+      var imgarr = (o.detail && o.detail.imgarr) || {};
+      var plist = (o.detail && o.detail.plist) || {};
+      var photoN = 0; for (var k in imgarr){ photoN += (imgarr[k]||[]).length; }
+      var st = d.wstatus_name || (d.wstatus!=null ? ('状态码 '+d.wstatus) : '—');
+      var hd = '<div class="o-hd"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span><span class="o-amt2">¥'+fmtYuan(d.trmb)+'</span><span class="o-tog">[展开]</span><div class="o-dt2">'+esc(d.ctime||'')+(garments.length?(' · '+garments.length+' 件衣物'):'')+(photoN?(' · '+photoN+' 张照片'):'')+'</div></div>';
+      var bd = [];
+      if(garments.length){
+        bd.push('<table class="o-gt"><thead><tr><th>衣物</th><th>条码</th><th style="text-align:right">洗涤价</th><th style="text-align:right">实收</th></tr></thead><tbody>');
+        garments.forEach(function(g){ bd.push('<tr><td>'+esc(g.clothname||'—')+'</td><td>'+esc(g.barcode||'—')+'</td><td style="text-align:right">¥'+fmtYuan(g.trmb)+'</td><td style="text-align:right">¥'+fmtYuan(g.cutrmb)+'</td></tr>'); });
+        bd.push('</tbody></table>');
+      }
+      var figs = []; var used = {};
+      garments.forEach(function(g){ var key=String(g.washid); used[key]=1; (imgarr[key]||[]).forEach(function(im){ figs.push('<figure><a href="'+esc(im.url||im.vurl||im.iurl)+'" target="_blank"><img loading="lazy" src="'+esc(im.iurl||im.url)+'" alt="'+esc(g.clothname||'')+'"></a><figcaption>'+esc(g.clothname||'')+'</figcaption></figure>'); }); });
+      for (var k2 in imgarr){ if(used[k2]) continue; (imgarr[k2]||[]).forEach(function(im){ figs.push('<figure><a href="'+esc(im.url||im.vurl||im.iurl)+'" target="_blank"><img loading="lazy" src="'+esc(im.iurl||im.url)+'" alt=""></a><figcaption>其他照片</figcaption></figure>'); }); }
+      if(figs.length) bd.push('<div class="o-ph">'+figs.join('')+'</div>');
+      var pays = [];
+      for (var k3 in plist){ (plist[k3]||[]).forEach(function(it){ pays.push(esc(it.name||('类型'+it.ptype))+' ¥'+fmtYuan(it.rmb)+(it.time?('（'+esc(it.time)+'）'):'')); }); }
+      if(!pays.length && d.bbalance!=null && d.ebalance!=null && Number(d.bbalance)>Number(d.ebalance)){ pays.push('余额支付 ¥'+fmtYuan(Number(d.bbalance)-Number(d.ebalance))+'（余额 '+fmtYuan(d.bbalance)+' → '+fmtYuan(d.ebalance)+'）'); }
+      if(pays.length) bd.push('<div class="o-pay">支付：'+pays.join('；')+'</div>');
+      return '<div class="o-card">'+hd+'<div class="o-bd" style="display:none">'+bd.join('')+'</div></div>';
+    }
+    function bindOrderCards(box){
+      Array.prototype.forEach.call(box.querySelectorAll('.o-hd'), function(h){
+        h.addEventListener('click', function(){
+          var bd = h.parentNode.querySelector('.o-bd');
+          var tog = h.querySelector('.o-tog');
+          var open = bd.style.display !== 'none';
+          bd.style.display = open ? 'none' : 'block';
+          if(tog) tog.textContent = open ? '[展开]' : '[收起]';
+        });
+      });
+    }
 
     /* ---------- 状态与筛选 ---------- */
     var state={q:'',level:'',source:'',status:'',balMin:null,balMax:null,sort:'ctime_desc',page:1,size:50,sel:null};
@@ -407,18 +475,43 @@
       H.push(kv('姓名拼音', vOr(m.py)));
       if(d&&d.edate) H.push(kv('到期日期', vOr(d.edate)));
       H.push('</div></div>');
-      /* 订单明细 */
-      if(d && d.order && d.order.list && d.order.list.length){
-        H.push('<div class="sec"><h3>订单明细（'+d.order.list.length+' 笔）</h3><div style="overflow:auto"><table class="ordtable"><thead><tr><th>订单号</th><th>业务码</th><th>金额</th><th>状态码</th><th>时间</th></tr></thead><tbody>');
-        d.order.list.forEach(function(o){
-          H.push('<tr><td>'+esc(o.orderid)+'</td><td>'+esc(o.sncode)+'</td><td class="money">¥'+fmtYuan(o.trmb)+'</td><td>'+esc(o.wstatus)+'</td><td class="muted">'+esc(o.ctime)+'</td></tr>');
-        });
-        H.push('</tbody></table></div><div class="muted" style="font-size:12px;margin-top:6px">金额单位为系统原始数据（已换算为元）；状态码为系统内部编码。</div></div>');
-      } else if(d){
-        H.push('<div class="sec"><h3>订单明细</h3><div class="muted">该会员暂无订单记录</div></div>');
-      } else {
-        H.push('<div class="sec"><h3>订单明细</h3><div class="muted">该会员的详情数据尚未抓取（可用「导出会员数据(含详情).cmd」补充后再生成查询页）</div></div>');
-      }
+      /* 订单记录（整合订单详情，分片懒加载；无订单数据时回退到详情中的最近订单） */
+      H.push('<div class="sec"><h3>订单记录</h3><div class="muted" id="ordersState">正在加载订单数据…</div><div id="ordersBox"></div></div>');
+      (function(){
+        var curUid = String(m.uid);
+        var dRef = d;
+        /* 延迟到面板 HTML 写入后再执行，避免同步分支拿不到元素 */
+        setTimeout(function(){
+          if(state.sel !== curUid) return;
+          var stEl = document.getElementById('ordersState');
+          var boxEl = document.getElementById('ordersBox');
+          var part = (D.orderIndex && D.orderIndex[curUid]) || null;
+          if(part){
+            loadOrderPart(part, function(err){
+              if(state.sel !== curUid) return;
+              var stEl2 = document.getElementById('ordersState');
+              var box2 = document.getElementById('ordersBox');
+              var recs = (window.ORDER_PARTS && window.ORDER_PARTS[part]) || {};
+              var rec = recs[curUid];
+              if(err || !rec){
+                if(stEl2) stEl2.innerHTML = '订单数据加载失败（请重试或重新打开页面）';
+                return;
+              }
+              if(stEl2) stEl2.innerHTML = '共 <b>' + rec.orders.length + '</b> 笔订单' + (rec.orders.length ? '（点击订单可展开衣物与照片）' : '');
+              if(box2){ box2.innerHTML = rec.orders.map(function(o){ return orderCardHtml(o); }).join(''); bindOrderCards(box2); }
+            });
+          } else {
+            if(dRef && dRef.order && dRef.order.list && dRef.order.list.length){
+              if(stEl) stEl.innerHTML = '该会员的完整订单数据尚未抓取，以下为详情中的最近 ' + dRef.order.list.length + ' 笔订单';
+              if(boxEl) boxEl.innerHTML = '<div style="overflow:auto"><table class="ordtable"><thead><tr><th>订单号</th><th>业务码</th><th>金额</th><th>状态码</th><th>时间</th></tr></thead><tbody>' + dRef.order.list.map(function(o){ return '<tr><td>'+esc(o.orderid)+'</td><td>'+esc(o.sncode)+'</td><td class="money">¥'+fmtYuan(o.trmb)+'</td><td>'+esc(o.wstatus)+'</td><td class="muted">'+esc(o.ctime)+'</td></tr>'; }).join('') + '</tbody></table></div>';
+            } else if(dRef){
+              if(stEl) stEl.innerHTML = '该会员暂无订单记录（完整订单数据尚未抓取）';
+            } else {
+              if(stEl) stEl.innerHTML = '该会员的详情数据尚未抓取（可用「导出会员数据(含详情).cmd」补充后再生成查询页）';
+            }
+          }
+        }, 0);
+      })();
       /* 卡券 */
       if(d){
         H.push('<div class="sec"><h3>卡券</h3>');

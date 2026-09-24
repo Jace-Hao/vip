@@ -145,6 +145,94 @@ def main():
         'detailErrors': det_errors,
     }
 
+    # 3) 订单数据（.orders_results.jsonl 主源 + 单会员文件补充）→ 合并并切分懒加载分片
+    order_map = {}
+    ord_jsonl_n = 0
+    ord_single_n = 0
+    jsonl_candidates = [os.path.join(out_dir, '.orders_results.jsonl'),
+                        os.path.join(out_dir, '订单数据', '.orders_results.jsonl')]
+    for jsonl_orders in jsonl_candidates:
+        if not os.path.exists(jsonl_orders):
+            continue
+        with open(jsonl_orders, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                uid = str(o.get('uid')) if o.get('uid') is not None else ''
+                if uid and isinstance(o.get('orders'), list):
+                    order_map[uid] = {
+                        'uid': o.get('uid'), 'name': o.get('name') or '', 'phone': o.get('phone') or '',
+                        'orderCount': o.get('orderCount') or len(o['orders']),
+                        'fetchedAt': o.get('fetchedAt') or '', 'orders': o['orders'],
+                    }
+                    ord_jsonl_n += 1
+    for f2 in glob.glob(os.path.join(out_dir, '订单数据', '订单_*.json')):
+        try:
+            with open(f2, encoding='utf-8') as fp:
+                o2 = json.load(fp)
+            mem = o2.get('member') or {}
+            uid = str(mem.get('uid')) if mem.get('uid') is not None else ''
+            if uid and uid not in order_map and isinstance(o2.get('orders'), list):
+                order_map[uid] = {
+                    'uid': mem.get('uid'), 'name': mem.get('name') or '', 'phone': mem.get('phone') or '',
+                    'orderCount': o2.get('orderCount') or len(o2['orders']),
+                    'fetchedAt': o2.get('fetchedAt') or '', 'orders': o2['orders'],
+                }
+                ord_single_n += 1
+        except Exception:
+            pass
+
+    # 订单号反查索引（搜索订单号/业务码即可定位会员）
+    order_search = {}
+    for uid, rec in order_map.items():
+        ids = []
+        for o in rec.get('orders') or []:
+            if o.get('orderid') is not None:
+                ids.append(str(o.get('orderid')))
+            if o.get('sncode') is not None:
+                ids.append(str(o.get('sncode')))
+        if ids:
+            order_search[uid] = ' '.join(ids)
+    result['orderSearch'] = order_search
+
+    # 切分分片（每片 60 人；页面按需懒加载，保障全量数据下秒开）
+    uid_order_index = {str(m.get('uid')): i for i, m in enumerate(members)}
+    items = sorted(order_map.items(), key=lambda kv: uid_order_index.get(kv[0], 10 ** 9))
+    parts_dir = os.path.join(view_dir, '订单分片')
+    os.makedirs(parts_dir, exist_ok=True)
+    for old in glob.glob(os.path.join(parts_dir, 'part_*.js')):
+        try:
+            os.remove(old)
+        except Exception:
+            pass
+    order_index = {}
+    part_count = 0
+    chunk = 60
+    for i in range(0, len(items), chunk):
+        part_name = 'part_%03d' % (i // chunk)
+        recs = dict(items[i:i + chunk])
+        txt = 'window.ORDER_PARTS=window.ORDER_PARTS||{};window.ORDER_PARTS[%s]=%s;' % (
+            json.dumps(part_name), json.dumps(recs, ensure_ascii=False, separators=(',', ':'))
+        )
+        with open(os.path.join(parts_dir, part_name + '.js'), 'w', encoding='utf-8') as f3:
+            f3.write(txt)
+        for uid in recs:
+            order_index[uid] = part_name
+        part_count += 1
+    result['orderIndex'] = order_index
+    result['orderMeta'] = {
+        'covered': len(order_map),
+        'orders': sum((r.get('orderCount') or 0) for r in order_map.values()),
+        'parts': part_count,
+        'fromJsonl': ord_jsonl_n,
+        'fromSingle': ord_single_n,
+    }
+
     os.makedirs(view_dir, exist_ok=True)
     out_js = os.path.join(view_dir, 'data.js')
     txt = 'window.MEMBER_DATA=' + json.dumps(result, ensure_ascii=False, separators=(',', ':')) + ';'
@@ -153,6 +241,8 @@ def main():
 
     print('数据已生成：', out_js)
     print('  会员：%d 人 | 详情：%d 人（其中 JSON %d + 续传记录 %d）' % (len(members), len(details), det_ok, jsonl_add))
+    om = result['orderMeta']
+    print('  订单：覆盖 %d 人 / %d 单；分片 %d 个（jsonl %d + 单会员文件 %d）' % (om['covered'], om['orders'], om['parts'], om['fromJsonl'], om['fromSingle']))
     if det_json:
         print('  详情文件：', os.path.basename(det_json), ('（含 %d 条失败记录可续传补抓）' % det_errors) if det_errors else '')
     print('  源数据：', os.path.basename(main_json))
