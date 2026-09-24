@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>洗衣管家 · 会员数据导出工具 — 开发交接文档</title>
+<style>
+:root{
+  --paper:#f7f7f3;
+  --ink:#171a16;
+  --ink-2:#565c55;
+  --ink-3:#6d736b;
+  --rule:#e1e2d9;
+  --rule-strong:#c9cbbf;
+  --accent:#7a5c14;
+  --accent-soft:rgba(122,92,20,.10);
+  --sans:"PingFang SC","Microsoft YaHei","Source Han Sans SC","Noto Sans CJK SC","Segoe UI",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+  --nav-w:clamp(210px,17vw,252px);
+  --measure:52em;
+}
+*{box-sizing:border-box}
+html{background:var(--paper)}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.75 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:underline;text-decoration-color:rgba(133,101,26,.45);text-underline-offset:3px}
+::selection{background:var(--accent-soft)}
+.layout{display:grid;grid-template-columns:var(--nav-w) minmax(0,1fr);min-height:100vh}
+.sidebar{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--rule);padding:34px 22px 26px;display:flex;flex-direction:column}
+.brand-name{font-size:13.5px;font-weight:600;line-height:1.55;letter-spacing:.01em}
+.brand-sub{margin-top:7px;font:11px/1.6 var(--mono);letter-spacing:.07em;color:var(--ink-3);text-transform:uppercase}
+.side-divider{margin:22px 0 16px;border-top:1px solid var(--rule-strong);width:38px}
+nav{display:flex;flex-direction:column;gap:2px}
+nav a{display:flex;gap:10px;align-items:baseline;padding:5px 0;font-size:13.5px;color:var(--ink-2);text-decoration:none}
+nav a .no{font:11px/1 var(--mono);color:var(--ink-3);letter-spacing:.06em}
+.side-foot{margin-top:auto;padding-top:22px;font:11px/1.75 var(--mono);color:var(--ink-3);letter-spacing:.05em}
+.main{padding:0 clamp(26px,4.5vw,64px) 96px}
+.main-inner{max-width:1100px;margin:0 auto}
+.masthead{padding:64px 0 30px;border-bottom:1px solid var(--rule-strong)}
+.kicker{font:11px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--accent)}
+h1{margin:18px 0 0;font-size:clamp(30px,3.6vw,44px);line-height:1.16;font-weight:600;letter-spacing:-.012em}
+.lede{margin:20px 0 0;max-width:var(--measure);font-size:16.5px;line-height:1.78;color:var(--ink-2)}
+.meta-strip{display:flex;flex-wrap:wrap;gap:26px 44px;align-items:flex-end;justify-content:space-between;padding:26px 0 0}
+.barcode-block{display:flex;flex-direction:column;gap:9px}
+.barcode{color:var(--ink);opacity:.85}
+.barcode-cap{font:11px/1 var(--mono);letter-spacing:.09em;color:var(--ink-3)}
+.meta-dl{display:flex;flex-wrap:wrap;gap:10px 38px;margin:0}
+.meta-dl div{display:flex;gap:10px;align-items:baseline}
+.meta-dl dt{font:11px/1.6 var(--mono);letter-spacing:.07em;color:var(--ink-3)}
+.meta-dl dd{margin:0;font-size:13.5px;color:var(--ink-2)}
+section{margin-top:64px}
+.sec-head{display:flex;align-items:baseline;gap:14px;padding-bottom:12px;border-bottom:1px solid var(--rule-strong)}
+.sec-no{font:11.5px/1 var(--mono);letter-spacing:.08em;color:var(--ink-3)}
+h2{margin:0;font-size:22px;font-weight:600;letter-spacing:-.005em}
+h3{margin:30px 0 0;font-size:15px;font-weight:600}
+h4{margin:22px 0 0;font-size:14px;font-weight:600}
+p{margin:16px 0 0;max-width:var(--measure)}
+a.t-mono,h4+.table-wrap{margin-top:14px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;margin:22px 0 0;font-size:13.5px}
+th{font:11px/1.6 var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);text-align:left;padding:0 16px 9px 0;border-bottom:1px solid var(--rule-strong);font-weight:500;white-space:nowrap}
+td{padding:11px 16px 11px 0;border-bottom:1px solid var(--rule);vertical-align:top;line-height:1.68}
+th:last-child,td:last-child{padding-right:0}
+.t-mono{font:12.5px/1.7 var(--mono)}
+ul.doc,ol.doc{margin:16px 0 0;padding-left:22px;max-width:var(--measure)}
+ul.doc li,ol.doc li{margin:7px 0;line-height:1.72}
+pre.code{margin:18px 0 0;padding:14px 18px;background:#fbfbf7;border:1px solid var(--rule);border-radius:3px;overflow-x:auto;max-width:var(--measure)}
+pre.code code{font:12.5px/1.75 var(--mono);color:#2c332a;white-space:pre}
+code.t-mono{background:#f1f1ea;padding:1px 5px;border-radius:2px}
+blockquote.callout{margin:18px 0 0;padding:10px 16px;border-left:2px solid var(--accent);background:var(--accent-soft);max-width:var(--measure);font-size:14px;color:var(--ink-2)}
+.colophon{margin-top:88px;padding-top:20px;border-top:1px solid var(--rule-strong);max-width:var(--measure);font-size:12.5px;line-height:1.85;color:var(--ink-3)}
+@media (max-width:980px){
+  .layout{grid-template-columns:1fr}
+  .sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--rule);flex-direction:row;flex-wrap:wrap;align-items:center;gap:12px 26px;padding:20px 26px}
+  .side-divider{display:none}
+  nav{flex-direction:row;flex-wrap:wrap;gap:2px 16px}
+  .side-foot{margin:0;padding:0}
+}
+@media print{
+  .layout{display:block}
+  .sidebar{display:none}
+  .main{padding:0}
+  section{break-inside:avoid-page}
+  a{color:inherit;text-decoration:none}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<aside class="sidebar">
+  <div>
+    <div class="brand-name">星期衣精致洗衣衣物照片系统</div>
+    <div class="brand-sub">Developer Handover · 开发交接</div>
+  </div>
+  <div class="side-divider"></div>
+  <nav>
+<a href="#s01"><span class="no">01</span>1. 项目概览</a>
+    <a href="#s02"><span class="no">02</span>2. 运行环境与依赖</a>
+    <a href="#s03"><span class="no">03</span>3. 取数原理</a>
+    <a href="#s04"><span class="no">04</span>4. 目录结构</a>
+    <a href="#s05"><span class="no">05</span>5. 数据文件说明</a>
+    <a href="#s06"><span class="no">06</span>6. 操作台与自动化机制</a>
+    <a href="#s07"><span class="no">07</span>7. 安全红线</a>
+    <a href="#s08"><span class="no">08</span>8. 版本历史</a>
+    <a href="#s09"><span class="no">09</span>9. 已知限制与踩坑记录</a>
+    <a href="#s10"><span class="no">10</span>10. 当前进度与待办</a>
+    <a href="#s11"><span class="no">11</span>11. 接手清单</a>
+  </nav>
+  <div class="side-foot">GENERATED 2026-09-24 · md2doc</div>
+</aside>
+
+<main class="main">
+<div class="main-inner">
+
+  <header class="masthead">
+    <div class="kicker">Developer Handover · 开发交接文档</div>
+    <h1>洗衣管家 · 会员数据导出工具 — 开发交接文档</h1>
+    <p class="lede">真实教训（2026-09-24）：手动清空「订单数据」文件夹时把 `.orders_results.jsonl` 一并删了，导致续传基线丢失（已从回收站恢复）。自动清理对点开头文件永久豁免；人工清理时请同样避开。</p>
+    <div class="meta-strip">
+      <div class="barcode-block">
+        <svg class="barcode" width="131" height="20" viewBox="0 0 131 20" aria-hidden="true">
+          <path fill="currentColor" d="M0 0h2v20H0z M4 0h1v20H4z M7 0h3v20H7z M12 0h2v20h-2z M16 0h1v20h-1z M19 0h4v20h-4z M25 0h2v20h-2z M29 0h1v20h-1z M32 0h3v20h-3z M37 0h2v20h-2z M41 0h1v20h-1z M44 0h2v20h-2z M48 0h4v20h-4z M54 0h1v20h-1z M57 0h3v20h-3z M62 0h2v20h-2z M66 0h1v20h-1z M69 0h2v20h-2z M73 0h3v20h-3z M78 0h1v20h-1z M81 0h4v20h-4z M87 0h2v20h-2z M91 0h1v20h-1z M94 0h3v20h-3z M99 0h2v20h-2z M103 0h1v20h-1z M106 0h2v20h-2z M110 0h4v20h-4z M116 0h1v20h-1z M119 0h3v20h-3z M124 0h2v20h-2z M128 0h1v20h-1z"/>
+        </svg>
+        <span class="barcode-cap">XQY-LAUNDRY-PHOTO · v1.1.4 · HANDOVER</span>
+      </div>
+      <dl class="meta-dl">
+        <div><dt>仓库</dt><dd><a href="https://github.com/Jace-Hao/xingqiyi-laundry-photo">Jace-Hao/xingqiyi-laundry-photo</a></dd></div>
+        <div><dt>适用版本</dt><dd>v1.1.4（2026-09-22）</dd></div>
+        <div><dt>文档日期</dt><dd>2026-09-22</dd></div>
+      </dl>
+    </div>
+  </header>
+
+<div class="table-wrap"><table><thead><tr><th>项目</th><th>内容</th></tr></thead><tbody><tr><td>文档版本</td><td>v1.6（2026-09-24）</td></tr><tr><td>工具目录</td><td><code class="t-mono">E:\软件开发\洗衣管家会员导出</code></td></tr><tr><td>代码仓库</td><td>&lt;https://github.com/Jace-Hao/vip&gt;（main 分支）</td></tr><tr><td>服务对象</td><td>洗衣管家 v6.1.x（门店收银/会员软件）</td></tr><tr><td>维护约定</td><td>本文档是最完整的交接材料；README.md 是 v1.6 功能速览；使用说明.html 停留在 v1.5 时代</td></tr></tbody></table></div>
+
+<section id="s01"><div class="sec-head"><span class="sec-no">01</span><h2>1. 项目概览</h2></div>
+
+<p>一套<strong>只读</strong>的门店数据工具：从「洗衣管家」软件里导出会员数据、逐会员详情和全部订单明细，生成离线可搜索的「会员数据查询台」，并配套一个带定时同步、自动关机、开机自启、自动清理的抓取操作台。</p>
+
+<div class="table-wrap"><table><thead><tr><th>能力</th><th>入口</th><th>说明</th></tr></thead><tbody><tr><td>会员导出（常规+全量字段）</td><td><code class="t-mono">导出会员数据.cmd</code></td><td>几秒完成，常规 9 列 + 档案全字段 62 列</td></tr><tr><td>逐会员详情导出（增量）</td><td><code class="t-mono">导出会员数据(含详情).cmd</code></td><td>标签/余额构成/卡券/订单号/最近充值；签名比对增量，只抓新增/变更</td></tr><tr><td>订单明细抓取</td><td>操作台 或 <code class="t-mono">fetch_orders.mjs</code></td><td>逐单完整详情（衣物/照片链接/支付/状态历史），断点续传</td></tr><tr><td>会员数据查询台</td><td><code class="t-mono">打开会员查询页面.cmd</code></td><td>离线单页，搜索/筛选/订单详情/卡券/订单号反查</td></tr><tr><td>订单抓取操作台</td><td><code class="t-mono">打开订单抓取操作台.cmd</code></td><td>开始/暂停/进度/日志/定时同步/同步后关机/手动清理</td></tr></tbody></table></div>
+
+<p><strong>原则：全程只读</strong>。所有取数通过软件的查询接口完成，不写入、不点击界面。</p>
+
+</section>
+
+<section id="s02"><div class="sec-head"><span class="sec-no">02</span><h2>2. 运行环境与依赖</h2></div>
+
+<div class="table-wrap"><table><thead><tr><th>依赖</th><th>位置 / 版本</th><th>说明</th></tr></thead><tbody><tr><td>操作系统</td><td>Windows 10/11 中文环境</td><td>门店工作机即开发机</td></tr><tr><td>Node.js</td><td><code class="t-mono">D:\node.js\node.exe</code>（v22+，实测 v24 也可）</td><td><strong>零第三方依赖</strong>，脚本全部是 ESM <code class="t-mono">.mjs</code></td></tr><tr><td>Python</td><td><code class="t-mono">%LOCALAPPDATA%\Python\bin\python.exe</code></td><td>仅 <code class="t-mono">make_xlsx.py</code>（openpyxl）与 <code class="t-mono">build_viewer.py</code>（标准库）使用</td></tr><tr><td>洗衣管家</td><td><code class="t-mono">D:\Blending_Release-6.1.17\xygjwinapp.exe</code></td><td>必须带 <code class="t-mono">--remote-debugging-port=9222</code> 启动才能取数</td></tr><tr><td>计划任务</td><td><code class="t-mono">XQY-Orders-Console</code></td><td>开机自启（登录后 30 秒，wscript 隐藏启动）</td></tr></tbody></table></div>
+
+<p>编码注意：<code class="t-mono">.cmd</code> 必须 <strong>GBK + CRLF</strong>；PowerShell 脚本中文注意保存编码；跑 Python 输出带 <code class="t-mono">¥</code> 等字符时加 <code class="t-mono">-X utf8</code> 与 <code class="t-mono">PYTHONIOENCODING=utf-8</code>。</p>
+
+</section>
+
+<section id="s03"><div class="sec-head"><span class="sec-no">03</span><h2>3. 取数原理（核心架构）</h2></div>
+
+<p>所有数据通过 <strong>CDP（Chrome DevTools Protocol，端口 9222）注入页面上下文</strong>，调用洗衣管家软件自身的查询接口：</p>
+
+<pre class="code"><code>找 9222 调试端口的目标页面
+  → Runtime.evaluate 在页面内执行包装函数
+  → 页面内用 $request 发软件自己的 XHR（带软件的登录态）
+  → 拿到 JSON 返回</code></pre>
+
+<div class="table-wrap"><table><thead><tr><th>接口</th><th>用途</th><th>备注</th></tr></thead><tbody><tr><td><code class="t-mono">getuinfo</code></td><td>会员详情（含卡券、订单数）</td><td>详情导出主接口</td></tr><tr><td><code class="t-mono">searchwashorders</code></td><td>订单列表（按 uid 分页）</td><td><code class="t-mono">start/size/currentPage/currenQuantity</code>（注意拼写 curren）</td></tr><tr><td><code class="t-mono">getorderdetail</code></td><td>单笔订单完整详情</td><td>约 15.6KB/单：114 字段 + 衣物数组 + 三套照片 URL + 支付 plist + 状态历史</td></tr><tr><td><code class="t-mono">getordercloth</code></td><td>订单衣物</td><td>实测无需（getorderdetail 已含）</td></tr></tbody></table></div>
+
+<p><strong>关键坑：页面内 <code class="t-mono">$request</code> 的回调在非成功时可能永远不触发</strong> → 必须自带超时兜底（页内 25s + evaluate 外层 40s），否则整个流程挂死。</p>
+
+<p><strong>服务端限速</strong>：请求达到数百次后服务端会冷却（实测 30~40 分钟不响应），营业时段更严重（白天几乎全部超时）。应对策略（已内建）：失败自动等待 180 秒重试、断点续传、夜间定时同步避开营业时段。<strong>慢不丢数据，只要一直跑就能抓完。</strong></p>
+
+</section>
+
+<section id="s04"><div class="sec-head"><span class="sec-no">04</span><h2>4. 目录结构</h2></div>
+
+<pre class="code"><code>洗衣管家会员导出\
+├─ 导出会员数据.cmd            ← 日常导出入口（常规+全量字段）
+├─ 导出会员数据(含详情).cmd     ← 完整导出（+详情/卡券/订单号，增量）
+├─ 打开会员查询页面.cmd         ← 查询台入口（先刷新数据再开浏览器）
+├─ 打开订单抓取操作台.cmd       ← 操作台入口（服务已在后台时只开页面）
+├─ 以调试模式启动洗衣管家.cmd   ← 应急：以调试端口重启洗衣管家
+├─ 安装开机自启.cmd            ← 注册开机自启计划任务
+├─ 移除开机自启.cmd            ← 移除上述计划任务
+├─ 开机自启-操作台服务.vbs      ← 计划任务实际执行的无窗口启动器
+├─ 操作页面.html               ← 操作台前端（单文件）
+├─ 导出流程图.png / 操作台运行流程图.png
+├─ README.md / 使用说明.html / 开发交接文档.md / .html
+├─ app\
+│  ├─ export.mjs               ← 会员导出+详情增量（memberSig 签名比对、--deep/--deep-full）
+│  ├─ fetch_orders.mjs         ← 订单抓取（--uid/--sample/--all、断点续传、单实例锁）
+│  ├─ orders_server.mjs        ← 操作台本地服务（127.0.0.1:8791，含定时/关机/清理）
+│  ├─ build_viewer.py          ← 生成查询页 data.js + 订单分片 + 索引
+│  └─ make_xlsx.py             ← Excel 生成（openpyxl）
+├─ 查询页面\
+│  ├─ index.html               ← 查询台（离线单页）
+│  ├─ data.js                  ← 全部会员+详情+订单索引（自动生成）
+│  └─ 订单分片\part_NNN.js      ← 订单数据分片（60 人/片，页面按需加载）
+└─ 导出结果\                    ← 所有导出/抓取产物（gitignore，绝不入库）</code></pre>
+
+</section>
+
+<section id="s05"><div class="sec-head"><span class="sec-no">05</span><h2>5. 数据文件说明（接手必读）</h2></div>
+
+<h3>5.1 带时间戳的导出产物</h3>
+
+<p>每次「含详情导出」或「定时同步」都会在 <code class="t-mono">导出结果\</code> 生成一套同时间戳文件（<code class="t-mono">_YYYYMMDD_HHMMSS</code>）：</p>
+
+<ul class="doc"><li><code class="t-mono">会员导出_*.json / .csv</code> — 常规 9 列 + 全量 62 列（json 含 <code class="t-mono">fullRows</code>，是查询台的会员主源）</li><li><code class="t-mono">会员全量数据_*.csv / .json / .xlsx</code> — 全量字段表</li><li><code class="t-mono">会员详情_*.json / .xlsx</code> — 逐会员详情快照（json 内 <code class="t-mono">details</code> 数组，1962 条/全量）</li></ul>
+
+<p><code class="t-mono">导出结果\订单数据\</code> 内：<code class="t-mono">订单_*.json</code>（单会员抓取产物）、<code class="t-mono">会员订单_*.json</code>（批量合并快照）、<code class="t-mono">订单试点预览_*.html</code>（试点可视化）。</p>
+
+<h3>5.2 点开头的文件 = 正在使用的运行数据（清理功能永不触碰，手动清理也请保留）</h3>
+
+<div class="table-wrap"><table><thead><tr><th>文件</th><th>作用</th><th>丢了会怎样</th></tr></thead><tbody><tr><td><code class="t-mono">导出结果\订单数据\.orders_results.jsonl</code></td><td><strong>订单抓取基线</strong>：每行一个会员的完整订单 JSON（含 sig 签名、complete 标记）。增量比对、断点续传、查询台订单数据全部以它为主源</td><td>下次同步把全部 1911 位有订单会员的订单<strong>重抓一遍</strong>（数小时）</td></tr><tr><td><code class="t-mono">导出结果\.detail_cache.json</code></td><td>会员详情签名缓存（1962 条）</td><td>详情增量失效 → 详情全部重抓</td></tr><tr><td><code class="t-mono">导出结果\.deep_results.jsonl</code></td><td>详情抓取续传记录</td><td>影响同上（较轻）</td></tr><tr><td><code class="t-mono">导出结果\.last_export.json</code></td><td>最近一次导出的元信息</td><td>无关紧要</td></tr><tr><td><code class="t-mono">导出结果\订单数据\.orders_run.lock</code></td><td>抓取单实例锁（内容=PID，带存活检测）</td><td>陈旧锁会被自动清理，无需手动处理</td></tr><tr><td><code class="t-mono">.sync_schedule.json</code>（工具根目录）</td><td>定时同步设置（enabled/time/shutdownAfter/lastFiredDate）</td><td>定时设置回到默认（停用）</td></tr></tbody></table></div>
+
+<h3>5.3 查询台数据</h3>
+
+<ul class="doc"><li><code class="t-mono">查询页面\data.js</code>（约 5.7MB）：会员列表 + 全部详情 + <code class="t-mono">orderIndex/orderSearch</code>（订单号反查会员）。</li><li><code class="t-mono">查询页面\订单分片\part_NNN.js</code>：订单详情按 60 人/片懒加载，页面用到哪片注入哪片。</li><li>由 <code class="t-mono">build_viewer.py</code> 生成；它<strong>只读最新一份</strong> <code class="t-mono">会员导出_*.json</code> 与 <code class="t-mono">会员详情_*.json</code>，订单以 <code class="t-mono">.orders_results.jsonl</code> 为主源、<code class="t-mono">订单_*.json</code> 为补充。</li></ul>
+
+<h3>5.4 自动清理（v1.6 新增）</h3>
+
+<ul class="doc"><li>规则：按文件名时间戳分批，<strong>保留最近 2 批</strong>，其余移入<strong>回收站</strong>（可找回）。</li><li>触发：服务启动后 8 秒、每次抓取完成后（顺序：清理 → 刷新查询页 → 可选关机）、操作台按钮「清理过时数据」。</li><li>被占用的文件（如正开着的 Excel）自动跳过。</li></ul>
+
+</section>
+
+<section id="s06"><div class="sec-head"><span class="sec-no">06</span><h2>6. 操作台与自动化机制</h2></div>
+
+<h3>6.1 操作台服务（orders_server.mjs）</h3>
+
+<ul class="doc"><li>地址 <code class="t-mono">http://127.0.0.1:8791</code>（仅本机）；由计划任务开机自启，或双击 <code class="t-mono">打开订单抓取操作台.cmd</code>（已有实例时只开页面）。</li><li>状态机：<code class="t-mono">idle → deep（详情增量）→ orders（订单抓取）→ done/failed</code>，<code class="t-mono">paused</code> 为暂停。</li><li>API：<code class="t-mono">GET /api/status</code>、<code class="t-mono">POST /api/start</code>（<code class="t-mono">{"sample":N}</code> 可选）、<code class="t-mono">/api/stop</code>、<code class="t-mono">/api/rebuild</code>、<code class="t-mono">/api/cleanup</code>、<code class="t-mono">/api/schedule</code>（GET/POST）、<code class="t-mono">/api/cancel_shutdown</code>、<code class="t-mono">/api/open</code>。</li><li>抓取流水线：<code class="t-mono">export.mjs --deep</code>（详情增量）→ <code class="t-mono">fetch_orders.mjs --all</code>（订单，sig 比对跳过未变会员，<code class="t-mono">complete:false</code> 的自动补抓）。</li><li>失败处理：成员级失败等 180 秒重试一次；成员内失败订单等 180 秒统一重试一轮；仍失败标记 <code class="t-mono">complete:false</code>，后续运行自动补抓；连续失败过多自动停止（保留进度）。</li><li>单实例锁 <code class="t-mono">.orders_run.lock</code>（PID 存活检测）；重复自启的实例会因端口占用静默退出，且<strong>不会误删</strong>抓取中的锁。</li></ul>
+
+<h3>6.2 定时同步（页面设置，存 <code class="t-mono">.sync_schedule.json</code>）</h3>
+
+<ul class="doc"><li>触发条件（全部满足）：已启用、当前时间与设定时刻相差 ≤10 分钟、今天还没触发过、无正在运行的任务、锁文件不存在（或已死）。</li><li>到点流程：确保洗衣管家在调试模式（端口不通 → 自动 taskkill 后带 <code class="t-mono">--remote-debugging-port=9222</code> 重启，最多等 90 秒）→ 详情增量 → 订单抓取 → 自动清理 → 刷新查询页 →（勾选时）约 2 分钟后关机。</li><li><strong>任一环节失败都不会关机</strong>（软件重启失败、同步取消等情况直接终止本次定时任务）。</li><li>关机倒计时 120 秒，页面顶部红色提示条可一键取消（<code class="t-mono">shutdown /a</code>）。</li><li>错过设定时刻超过 10 分钟视为错过，次日再触发；每日循环，直到用户停用。</li></ul>
+
+<h3>6.3 开机自启</h3>
+
+<ul class="doc"><li>计划任务 <code class="t-mono">XQY-Orders-Console</code>：登录 Windows 后 30 秒，<code class="t-mono">wscript</code> 隐藏运行 <code class="t-mono">开机自启-操作台服务.vbs</code>（无窗口、不弹浏览器）。</li><li>重装：双击 <code class="t-mono">安装开机自启.cmd</code>；移除：<code class="t-mono">移除开机自启.cmd</code>。</li><li>关机后次日开机登录，服务自动就位 → 当晚定时同步照常。</li></ul>
+
+</section>
+
+<section id="s07"><div class="sec-head"><span class="sec-no">07</span><h2>7. 安全红线</h2></div>
+
+<ol class="doc"><li><strong>会员数据绝不进仓库、绝不外传</strong>。<code class="t-mono">.gitignore</code> 覆盖：<code class="t-mono">导出结果/</code>、<code class="t-mono">查询页面/data.js</code>、<code class="t-mono">查询页面/订单分片/</code>、<code class="t-mono">.dev/</code>、<code class="t-mono">.sync_schedule.json</code> 等。每次 commit 前核对 <code class="t-mono">git status</code>，出现数据文件立即中止。</li><li>对洗衣管家<strong>只读</strong>：只调查询接口，不写数据、不点界面。</li><li>营业时间<strong>不重启洗衣管家</strong>（店员正在使用；需要调试端口时等打烊或与店员协调）。</li><li>查询台/导出文件仅限门店内部使用。</li></ol>
+
+</section>
+
+<section id="s08"><div class="sec-head"><span class="sec-no">08</span><h2>8. 版本历史</h2></div>
+
+<div class="table-wrap"><table><thead><tr><th>版本</th><th>日期</th><th>内容</th></tr></thead><tbody><tr><td>v1.0</td><td>09-22</td><td>常规 9 列导出</td></tr><tr><td>v1.1</td><td>09-22</td><td>全量字段（62 列）+ 会员详情（标签/卡券/订单号，断点续传）</td></tr><tr><td>v1.2</td><td>09-22</td><td>会员数据查询台（离线单页），导出后自动刷新</td></tr><tr><td>v1.3</td><td>09-22</td><td>抓取失败自动等 180 秒重试；30 分钟无进展自动停止</td></tr><tr><td>v1.4</td><td>09-22</td><td>深度详情<strong>增量更新</strong>（memberSig 签名比对，--deep-full 强制全量）</td></tr><tr><td>v1.5</td><td>09-24</td><td>查询台整合<strong>订单详情</strong>（分片懒加载/订单号反查/待补抓合并显示：会员快照比抓取快照新的订单显示摘要卡并自动补齐）</td></tr><tr><td>v1.6</td><td>09-24</td><td><strong>订单抓取操作台</strong>（8791 服务+页面：开始/暂停/进度/日志）；<strong>定时同步</strong>（每日自动抓取+同步后自动关机可取消）；订单失败 180 秒重试与补抓标记；<strong>开机自启</strong>（XQY-Orders-Console）；<strong>自动清理</strong>（保留最近 2 批，回收站）；jsonl 过期 20 小时→7 天</td></tr></tbody></table></div>
+
+</section>
+
+<section id="s09"><div class="sec-head"><span class="sec-no">09</span><h2>9. 已知限制与踩坑记录</h2></div>
+
+<div class="table-wrap"><table><thead><tr><th>#</th><th>事项</th><th>说明 / 对策</th></tr></thead><tbody><tr><td>1</td><td>服务端限速</td><td>约 400 次请求后冷却 30~40 分钟；营业时段更严重。内建 180 秒等待+重试+续传，夜间跑最稳</td></tr><tr><td>2</td><td><code class="t-mono">$request</code> 回调不触发</td><td>非 success 时回调可能永不执行 → 所有调用必须带超时兜底</td></tr><tr><td>3</td><td>build_viewer 只取最新</td><td><code class="t-mono">会员导出_*.json</code>/<code class="t-mono">会员详情_*.json</code> 各只读最新一份；自动清理保留 2 批与其兼容</td></tr><tr><td>4</td><td>订单快照时间差</td><td>会员数据（列表）比订单抓取晚时，会出现「5 笔 vs 4 笔」——查询台已做合并显示（摘要卡+待补抓标注）</td></tr><tr><td>5</td><td>服务内状态 vs 模块级变量</td><td><code class="t-mono">start()</code> 会重置 state 对象；<code class="t-mono">scheduleTriggered</code> 这类跨阶段标记必须放模块级，且 deep 失败/暂停路径都要复位（否则可能在错误时机关机）</td></tr><tr><td>6</td><td>重复实例与锁</td><td>端口占用时自启实例静默退出；<code class="t-mono">process.on('exit')</code> 清锁前必须检查锁内 PID 是否存活，防止误删抓取中任务的锁</td></tr><tr><td>7</td><td>仓库文件名大小写</td><td>仓库里是小写 <code class="t-mono">readme.md</code>（Windows 大小写不敏感，<code class="t-mono">git add README.md</code> 不报错但也不生效）</td></tr><tr><td>8</td><td>临时目录会被清理</td><td><code class="t-mono">.openclaw\tmp</code> 类临时目录有外部自动清理机制，重要产物必须落进项目目录或入库</td></tr><tr><td>9</td><td>jsonl 过期</td><td><code class="t-mono">fetch_orders.mjs</code> 中 jsonl 超过 7 天未更新才会重置（v1.6 前是 20 小时，跨天续传会全量重抓）</td></tr><tr><td>10</td><td>git 提交显示乱码</td><td>控制台 GBK 显示问题，实际提交内容是正确的 UTF-8，勿因此反复重试</td></tr></tbody></table></div>
+
+</section>
+
+<section id="s10"><div class="sec-head"><span class="sec-no">10</span><h2>10. 当前进度与待办（2026-09-24 13:55）</h2></div>
+
+<div class="table-wrap"><table><thead><tr><th>事项</th><th>状态</th></tr></thead><tbody><tr><td>订单详情抓取</td><td><strong>487 / 1911 人</strong>（1200 单）已完成并保存；抓取处于暂停状态，待 19:00 定时同步自动续传</td></tr><tr><td>定时同步设置</td><td>用户已设「每天 19:00 · 同步后自动关机」，当天 19:00 首次生效</td></tr><tr><td>今晚 21:00 自动任务（cron 417c5eca）</td><td>详情增量 + 订单抓取 + 微信简报（与页面定时同步有锁避让，不冲突；电脑若已关机则自然跳过）</td></tr><tr><td>明早 07:30 检查（cron 75dd1ccf）</td><td>查进度 + 刷新查询页（电脑关机中则开机登录后操作台服务自动就位）</td></tr><tr><td>杨美霞（uid 25190368）第 5 单</td><td>183173138（¥531.70，09-23 新增）待补抓，查询台当前显示摘要卡「详情待补抓」，补抓后自动升级为完整卡</td></tr><tr><td>战福丽</td><td>onum&gt;0 但接口返回 0 单，待全量抓取完成后复核</td></tr></tbody></table></div>
+
+<p><strong>给接手者的第一晚预期</strong>：19:00 定时同步自动重启软件进调试模式 → 续传订单（数小时，限速等待属正常）→ 完成后自动刷新查询页 → 自动关机。次日查询台即含全部订单。</p>
+
+</section>
+
+<section id="s11"><div class="sec-head"><span class="sec-no">11</span><h2>11. 接手清单（常见操作速查）</h2></div>
+
+<div class="table-wrap"><table><thead><tr><th>想做什么</th><th>操作</th></tr></thead><tbody><tr><td>日常导出会员</td><td>双击 <code class="t-mono">导出会员数据.cmd</code></td></tr><tr><td>完整导出（含详情）</td><td>双击 <code class="t-mono">导出会员数据(含详情).cmd</code></td></tr><tr><td>查看会员/订单数据</td><td>双击 <code class="t-mono">打开会员查询页面.cmd</code></td></tr><tr><td>手动抓订单/看进度</td><td>双击 <code class="t-mono">打开订单抓取操作台.cmd</code> → 开始/暂停/日志</td></tr><tr><td>改定时同步时间/关机</td><td>操作台页面「定时同步」卡片 → 修改后保存</td></tr><tr><td>手动清理旧数据</td><td>操作台「清理过时数据」按钮（或等自动触发）</td></tr><tr><td>重装/移除开机自启</td><td>双击 <code class="t-mono">安装开机自启.cmd</code> / <code class="t-mono">移除开机自启.cmd</code></td></tr><tr><td>软件调试端口没开</td><td>关闭洗衣管家 → 双击 <code class="t-mono">以调试模式启动洗衣管家.cmd</code>（操作台定时触发时也会自动处理）</td></tr><tr><td>改了代码如何生效</td><td>操作台相关：重启服务（<code class="t-mono">schtasks /Run /TN "XQY-Orders-Console"</code> 或杀掉 8791 进程后双击 cmd）；抓取脚本相关：下一次任务启动自动用新代码</td></tr><tr><td>提交代码</td><td>只提交代码/文档；数据文件已在 .gitignore；提交后 <code class="t-mono">git push</code>（仓库 &lt;https://github.com/Jace-Hao/vip&gt;）</td></tr></tbody></table></div>
+
+<blockquote class="callout">文档生成：本 md 为源文件，html 由 <code class="t-mono">md2doc.js</code> 渲染（改内容请改 md 后重跑）。</blockquote>
+
+</section>
+
+  <div class="colophon">
+    <p>本文件由「开发工具发布与补丁md2doc.js」从《开发交接文档.md》生成 —— 修改内容请改 Markdown 源文件后重新生成，保持两份同步。</p>
+  </div>
+
+</div>
+</main>
+</div>
+</body>
+</html>
