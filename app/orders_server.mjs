@@ -151,7 +151,13 @@ async function schedulerTick() {
   schedBusy = true;
   pushLog('⏰ 定时同步触发（每天 ' + schedule.time + (schedule.shutdownAfter ? ' · 同步后自动关机' : '') + '）');
   try {
-    if (fs.existsSync(LOCK_PATH)) { pushLog('检测到已有抓取任务在运行，本次定时同步跳过。'); return; }
+    if (fs.existsSync(LOCK_PATH)) {
+      let lockAlive = false;
+      try { const lp = parseInt(fs.readFileSync(LOCK_PATH, 'utf8').trim(), 10); if (lp > 0) { try { process.kill(lp, 0); lockAlive = true; } catch (e) { lockAlive = false; } } } catch (e) { /* ignore */ }
+      if (lockAlive) { pushLog('检测到已有抓取任务在运行，本次定时同步跳过。'); return; }
+      clearLock();
+      pushLog('发现残留的陈旧锁文件，已自动清理。');
+    }
     const ok = await ensureDebugApp();
     if (!ok) { pushLog('本次定时同步取消（不执行关机）。'); return; }
     scheduleTriggered = true;
@@ -367,4 +373,16 @@ server.listen(PORT, '127.0.0.1', () => {
   pushLog('操作台服务已启动：http://127.0.0.1:' + PORT + '/');
   console.log('操作台服务已启动: http://127.0.0.1:' + PORT + '/');
 });
-process.on('exit', clearLock);
+server.on('error', (e) => {
+  const busy = e && e.code === 'EADDRINUSE';
+  console.error(busy ? '端口 8791 已被占用（可能已有操作台实例在运行），本次自启退出。' : ('服务异常：' + ((e && e.message) || e)));
+  process.exit(busy ? 0 : 1);
+});
+process.on('exit', () => {
+  try {
+    if (!fs.existsSync(LOCK_PATH)) return;
+    const lp = parseInt(fs.readFileSync(LOCK_PATH, 'utf8').trim(), 10);
+    if (lp > 0) { try { process.kill(lp, 0); return; } catch (e) { /* 进程已死，可清 */ } }
+    clearLock();
+  } catch (e) { /* ignore */ }
+});
