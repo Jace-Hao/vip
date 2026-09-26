@@ -179,35 +179,28 @@ async function fetchMemberOrders(cdp, m) {
   const failedRows = [];
   for (const row of orders) {
     let ok = false;
-    for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
-      try {
-        const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
-        details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
-        ok = true;
-      } catch (e) {
-        if (attempt < 2) {
-          console.log(`      订单 ${row.sncode} 取数失败（${e.message}），重试 1/2 ...`);
-          await sleep(1500);
-        }
-      }
+    try {
+      const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
+      details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
+      ok = true;
+    } catch (e) {
+      /* 超时/失败不立即重试，记录后统一进入 2 分钟休息 */
     }
     if (!ok) failedRows.push(row);
     await sleep(300);
   }
-  /* 失败的订单：按设定等待 180 秒后统一重试一轮（应对服务端限速/网络波动） */
+  /* 失败的订单：暂停 120 秒后统一补抓一轮（超时不重试，应对服务端限速/网络波动） */
   if (failedRows.length) {
-    console.log(`  ${m.name || uid}：${failedRows.length} 笔订单取数失败，等待 180 秒后重试...`);
-    await sleep(180000);
+    console.log(`  ${m.name || uid}：${failedRows.length} 笔订单取数失败，暂停 120 秒后统一补抓...`);
+    await sleep(120000);
     const still = [];
     for (const row of failedRows) {
       let ok = false;
-      for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
-        try {
-          const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
-          details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
-          ok = true;
-        } catch (e) { if (attempt < 2) await sleep(1500); }
-      }
+      try {
+        const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
+        details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
+        ok = true;
+      } catch (e) { /* 超时不重试 */ }
       if (!ok) still.push(row);
     }
     if (still.length) console.log(`  ${m.name || uid}：仍有 ${still.length} 笔订单失败（已跳过，后续运行会自动补抓）`);
@@ -258,7 +251,7 @@ async function runBatch(cdp, sample) {
   console.log('');
 
   const t0 = Date.now();
-  let okCount = 0, failCount = 0, orderTotal = 0, consecutiveFail = 0;
+  let okCount = 0, failCount = 0, orderTotal = 0, consecutiveFail = 0, doneSinceRest = 0;
   for (let i = 0; i < todo.length; i++) {
     const m = todo[i];
     const uid = String(m.uid);
@@ -268,12 +261,10 @@ async function runBatch(cdp, sample) {
     } catch (e) { /* ignore */ }
     const mStart = Date.now();
     let result = null, lastErr = null;
-    for (let attempt = 1; attempt <= 2 && !result; attempt++) {
-      try { result = await fetchMemberOrders(cdp, m); }
-      catch (e) {
-        lastErr = e;
-        if (attempt < 2) await waitLong(180, `${m.name || uid} 抓取失败（${e.message}）`);
-      }
+    try { result = await fetchMemberOrders(cdp, m); }
+    catch (e) {
+      lastErr = e;
+      await waitLong(120, `${m.name || uid} 抓取失败（${e.message}），按规则暂停 120 秒`);
     }
     if (!result) {
       failCount++; consecutiveFail++;
@@ -286,6 +277,11 @@ async function runBatch(cdp, sample) {
     fs.appendFileSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n', 'utf8');
     console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
     await sleep(400);
+    doneSinceRest++;
+    if (doneSinceRest >= 5 && i < todo.length - 1) {
+      doneSinceRest = 0;
+      await waitLong(120, '已连续抓取 5 人，休息 120 秒后继续');
+    }
   }
 
   const byUid = new Map();
