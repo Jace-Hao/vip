@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -123,16 +124,34 @@ async function ensureDebugApp() {
   return false;
 }
 
+/* 关机命令需要完整的环境块（缺 COMPUTERNAME 等变量时 shutdown.exe 会报 203 静默失败） */
+const SHUTDOWN_ENV = (() => {
+  const env = { ...process.env };
+  const defaults = {
+    COMPUTERNAME: process.env.COMPUTERNAME || os.hostname(), SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', SystemDrive: 'C:',
+    ComSpec: 'C:\\Windows\\system32\\cmd.exe', OS: 'Windows_NT',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD', TEMP: 'C:\\Windows\\TEMP', TMP: 'C:\\Windows\\TEMP',
+    ALLUSERSPROFILE: 'C:\\ProgramData', PUBLIC: 'C:\\Users\Public', ProgramData: 'C:\\ProgramData',
+  };
+  for (const k of Object.keys(defaults)) if (!env[k]) env[k] = defaults[k];
+  return env;
+})();
+const SHUTDOWN_EXE = 'C:\\Windows\\System32\\shutdown.exe';
+
 function doShutdown() {
   if (shutdownPending) return;
   shutdownPending = { since: Date.now() };
   pushLog('⚡ 同步完成：系统将在 ' + SHUTDOWN_DELAY + ' 秒后自动关机（可在本页面点「取消关机」）。');
-  try { const ch = spawn('shutdown', ['/s', '/t', String(SHUTDOWN_DELAY), '/c', '订单数据同步完成，系统即将关机'], { stdio: 'ignore', detached: true }); ch.on('error', () => {}); } catch (e) { pushLog('[错误] 关机命令执行失败：' + e.message); shutdownPending = null; }
+  try {
+    const ch = spawn(SHUTDOWN_EXE, ['/s', '/t', String(SHUTDOWN_DELAY), '/c', '订单数据同步完成，系统即将关机'], { stdio: 'ignore', detached: true, env: SHUTDOWN_ENV });
+    ch.on('error', (e) => { pushLog('[错误] 关机命令启动失败：' + e.message); shutdownPending = null; });
+    ch.on('exit', (code) => { if (code !== 0) { pushLog('[错误] 关机命令执行失败（代码 ' + code + '），已取消本次自动关机。'); shutdownPending = null; } });
+  } catch (e) { pushLog('[错误] 关机命令执行失败：' + e.message); shutdownPending = null; }
 }
 
 function cancelShutdown() {
   if (!shutdownPending) return { error: '当前没有待执行的关机' };
-  try { const ch = spawn('shutdown', ['/a'], { stdio: 'ignore' }); ch.on('error', () => {}); } catch (e) { /* ignore */ }
+  try { const ch = spawn(SHUTDOWN_EXE, ['/a'], { stdio: 'ignore', env: SHUTDOWN_ENV }); ch.on('error', () => {}); } catch (e) { /* ignore */ }
   shutdownPending = null;
   pushLog('已取消自动关机。');
   return { ok: true };
