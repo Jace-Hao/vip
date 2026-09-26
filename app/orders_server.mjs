@@ -278,7 +278,7 @@ function spawnPhase(kind) {
       lastExit = { kind: 'orders', code };
       pushLog(code === 0 ? '订单抓取完成。' : ('订单抓取进程退出（代码 ' + code + '）'));
       clearLock();
-      const wantShutdown = scheduleTriggered && schedule.shutdownAfter;
+      const wantShutdown = schedule.shutdownAfter; /* 勾选“同步后关机”即生效（手动/定时均适用） */
       scheduleTriggered = false;
       cleanupOldData().then(() => {
         const r2 = rebuild(wantShutdown);
@@ -299,6 +299,7 @@ function start(sample) {
   startedAt = new Date().toISOString();
   const args = sample > 0 ? ['app/fetch_orders.mjs', '--sample=' + sample] : ['app/fetch_orders.mjs', '--all'];
   spawnPhase('deep');
+  if (schedule.shutdownAfter) pushLog('⚡ 已开启「同步后关机」：本次同步完成后约 ' + SHUTDOWN_DELAY + ' 秒自动关机（完成前可随时取消）。');
   return { ok: true, sample: sample > 0 ? sample : 'all' };
 }
 
