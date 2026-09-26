@@ -20,6 +20,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import crypto2 from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -30,6 +31,7 @@ const LOCK_PATH = path.join(OUT_DIR, '.orders_run.lock');
 const JSONL_PATH = path.join(OUT_DIR, '.orders_results.jsonl');
 const LOG_MAX = 500;
 const SCHEDULE_FILE = path.join(ROOT, '.sync_schedule.json');
+const TOKEN_FILE = path.join(ROOT, '.console_token.txt');
 const APP_EXE = 'D:\\Blending_Release-6.1.17\\xygjwinapp.exe';
 const SHUTDOWN_DELAY = 120; // 同步完成后延迟关机秒数（期间可取消）
 
@@ -90,6 +92,49 @@ function loadBaseStats() {
     }
     return { members: (j.fullRows || []).length, withOrders, ordersSum, exportStamp: (j.exportStamp || '') };
   } catch (e) { return null; }
+}
+
+/* ---------------- 访问口令（外网暴露用） ---------------- */
+function loadToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+      if (t.length >= 6) return t;
+    }
+  } catch (e) { /* ignore */ }
+  /* 首次自动生成：8 位易读口令（去掉易混淆字符） */
+  const alphabet = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+  let code = '';
+  const buf = crypto2.randomBytes(6);
+  for (const b of buf) code += alphabet[b % alphabet.length];
+  try { fs.writeFileSync(TOKEN_FILE, code, 'utf8'); } catch (e) { /* ignore */ }
+  pushLog('已生成访问口令：' + code + '（保存于 .console_token.txt，可自行修改后重启服务）');
+  return code;
+}
+function checkAuth(req) {
+  const h = req.headers || {};
+  if (h['x-console-token'] === CONSOLE_TOKEN) return true;
+  const q = (req.url || '').split('?')[1] || '';
+  const m = /(?:^|&)token=([^&]*)/.exec(q);
+  if (m && decodeURIComponent(m[1]) === CONSOLE_TOKEN) return true;
+  const cookie = h.cookie || '';
+  const cm = /(?:^|;\s*)xconsole=([^;]*)/.exec(cookie);
+  return !!(cm && decodeURIComponent(cm[1]) === CONSOLE_TOKEN);
+}
+function sendLoginPage(res, msg) {
+  const m = msg ? String(msg).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) : '';
+  const body = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>操作台登录</title>' +
+    '<style>body{font-family:"Microsoft YaHei",sans-serif;background:#f4f6fb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}' +
+    '.box{background:#fff;border:1px solid #e2e6ee;border-radius:12px;padding:34px 38px;max-width:360px;width:92%}' +
+    'h1{font-size:19px;margin:0 0 6px}.sub{color:#5b6675;font-size:13px;margin:0 0 18px}' +
+    'input{width:100%;box-sizing:border-box;padding:11px 12px;font-size:16px;border:1px solid #c9d2e3;border-radius:9px;font-family:inherit;letter-spacing:2px}' +
+    'button{width:100%;margin-top:14px;padding:11px;border:0;border-radius:9px;background:#2b54a8;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}' +
+    '.err{color:#c94f4f;font-size:13px;min-height:18px;margin-top:10px}</style></head><body><div class="box">' +
+    '<h1>会员数据操作台</h1><p class="sub">请输入访问口令（本机保存在工具目录 .console_token.txt）</p>' +
+    '<form method="get" action="/"><input name="token" placeholder="访问口令" autofocus autocomplete="off"><button>进入操作台</button><div class="err">' + m + '</div></form>' +
+    '</div></body></html>';
+  res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(body);
 }
 
 /* ---------------- 定时同步 & 自动关机 ---------------- */
@@ -403,6 +448,19 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://127.0.0.1');
   const p = u.pathname;
   try {
+    if (!checkAuth(req)) {
+      if (p.startsWith('/api/')) { sendJson(res, { error: '需要访问口令' }, 401); return; }
+      sendLoginPage(res, '请输入访问口令');
+      return;
+    }
+    const tokQ = u.searchParams ? u.searchParams.get('token') : null;
+    if (req.method === 'GET' && tokQ != null && tokQ !== '') {
+      if (tokQ === CONSOLE_TOKEN) {
+        res.writeHead(302, { 'Set-Cookie': 'xconsole=' + encodeURIComponent(CONSOLE_TOKEN) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000', Location: '/' });
+        res.end();
+      } else { sendLoginPage(res, '口令不正确，请重新输入'); }
+      return;
+    }
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
       let html = '';
       try { html = fs.readFileSync(PAGE_FILE, 'utf8'); } catch (e) { html = '<!DOCTYPE html><meta charset="utf-8"><body style="font-family:sans-serif">未找到 操作页面.html</body>'; }
@@ -452,6 +510,7 @@ const server = http.createServer(async (req, res) => {
 loadSchedule();
 setInterval(() => { schedulerTick().catch((e) => { schedBusy = false; pushLog('[错误] 定时任务异常：' + e.message); }); }, 20000);
 setTimeout(() => { cleanupOldData(); }, 8000); // 启动后自动检查一次过时数据
+const CONSOLE_TOKEN = loadToken();
 baseStats = loadBaseStats();
 const js0 = readJsonlStats();
 baseDone = js0.members; baseOrders = js0.orders;

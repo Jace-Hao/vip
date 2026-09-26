@@ -119,9 +119,15 @@
   var PHASE_TEXT = { idle:'未运行', deep:'阶段 1 · 会员详情增量更新', orders:'阶段 2 · 订单抓取中', paused:'已暂停（进度保留）', done:'已完成', failed:'异常退出' };
   var serverOk = true;
 
+  var MY_TOKEN = (new URLSearchParams(location.search)).get('token') || '';
   function api(path, method, body){
-    return fetch(path, { method: method || 'GET', headers: {'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined })
-      .then(function(r){ return r.json().then(function(j){ return { code: r.status, j: j }; }); });
+    var headers = {'Content-Type':'application/json'};
+    if (MY_TOKEN) headers['x-console-token'] = MY_TOKEN;
+    return fetch(path, { method: method || 'GET', headers: headers, body: body ? JSON.stringify(body) : undefined })
+      .then(function(r){
+        if (r.status === 401) { document.cookie = 'xconsole=; Max-Age=0; path=/'; location.href = '/'; throw new Error('auth'); }
+        return r.json().then(function(j){ return { code: r.status, j: j }; });
+      });
   }
   function toast(msg){
     var t = $('#toast'); if (!t) return;
