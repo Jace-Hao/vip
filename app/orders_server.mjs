@@ -227,7 +227,7 @@ async function schedulerTick() {
     const ok = await ensureDebugApp();
     if (!ok) { pushLog('本次定时同步取消（不执行关机）。'); return; }
     scheduleTriggered = true;
-    const r = start(0);
+    const r = await start(0);
     if (r && r.error) { scheduleTriggered = false; pushLog('定时同步启动失败：' + r.error); }
   } finally { schedBusy = false; }
 }
@@ -353,8 +353,11 @@ function spawnPhase(kind) {
   });
 }
 
-function start(sample) {
+async function start(sample) {
   if (child) return { error: '已有任务在运行' };
+  /* 手动启动同样确保洗衣管家处于调试模式（未开/未带端口时自动重启软件） */
+  const dbg = await ensureDebugApp();
+  if (!dbg) return { error: '洗衣管家未能进入调试模式，请手动完全退出软件后，用「以调试模式启动洗衣管家.cmd」重开再试' };
   stopReq = false; lastExit = null;
   state = { progress: { done: 0, total: 0, current: '', memberOrders: 0 }, compare: null, deepProgress: null, cumulative: null, etaMin: null, totalWithOrders: state.totalWithOrders, ordersThisRun: 0, lastError: null };
   const js = readJsonlStats();
@@ -472,7 +475,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/start') {
       const body = await readBody(req);
       const sample = Number(body.sample) > 0 ? Number(body.sample) : 0;
-      const r = start(sample);
+      const r = await start(sample);
       sendJson(res, r, r.error ? 409 : 200);
       return;
     }
