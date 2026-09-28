@@ -30,7 +30,8 @@ curl -s -o nul --max-time 2 "http://127.0.0.1:8791/api/status"
 if not %errorlevel%==0 if %n% lss 10 goto :waitloop
 
 :open
-if not "%ORDER_UI_NOOPEN%"=="1" start "" "http://127.0.0.1:8791/"
+if not "%ORDER_UI_NOOPEN%"=="1" set /p TOKEN=<"%~dp0.console_token.txt"
+start " "http://127.0.0.1:8791/?token=%TOKEN%"
 echo.
 echo 操作台已在浏览器打开（服务 http://127.0.0.1:8791；最小化的服务窗口请保持开启）。
 goto :end
