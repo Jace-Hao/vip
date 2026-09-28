@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>收衣开单</title>
+<style>
+  :root{ --ink:#1c2430; --sub:#5b6675; --line:#e2e6ee; --bg:#f4f6fb; --card:#fff; --brand:#2b54a8; --brand2:#3b6fd4; --ok:#1f8a4c; --bad:#c94f4f; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.65 "Microsoft YaHei","微软雅黑",sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 18px 70px}
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  header h1{margin:0;font-size:20px}
+  header .sub{color:var(--sub);font-size:13px}
+  header .right{margin-left:auto;display:flex;gap:8px}
+  .btn{border:0;border-radius:9px;padding:8px 16px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;background:var(--brand);color:#fff}
+  .btn:hover{background:var(--brand2)}
+  .btn2{background:#fff;color:var(--brand);border:1px solid var(--line)}
+  .btn2:hover{border-color:var(--brand)}
+  .cols{display:grid;grid-template-columns:340px minmax(0,1fr);gap:14px;margin-top:14px}
+  @media (max-width:900px){.cols{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h3{margin:0 0 10px;font-size:15px}
+  .search input{width:100%;padding:10px 12px;border:1px solid #c9d2e3;border-radius:9px;font-size:15px;font-family:inherit}
+  .hits{margin-top:8px;max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:9px;display:none}
+  .hit{padding:8px 12px;cursor:pointer;border-bottom:1px solid #f1f5fb;display:flex;justify-content:space-between;gap:8px}
+  .hit:hover{background:#f2f7ff}
+  .hit b{font-size:14px}.hit .tel{color:var(--sub);font-size:13px}.hit .lv{color:var(--brand);font-size:12px}
+  .mbrief{display:none;margin-top:10px;background:#f7faff;border:1px solid #dbe6f7;border-radius:10px;padding:12px 14px}
+  .mbrief .n{font-size:16px;font-weight:700}
+  .mbrief .row{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:6px;color:var(--sub);font-size:13px}
+  .mbrief .row b{color:var(--ink)}
+  .mbrief .bal{color:var(--ok);font-weight:700}
+  .mbrief .clear{float:right;color:var(--sub);cursor:pointer;font-size:12px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+  .chip{background:#eef3fc;border:1px solid #dbe4f3;border-radius:999px;padding:6px 14px;font-size:13.5px;cursor:pointer;user-select:none}
+  .chip:hover{background:#e0ebfc;border-color:var(--brand2)}
+  table.items{width:100%;border-collapse:collapse;margin-top:10px;font-size:13.5px}
+  table.items th{background:#f7fafe;color:#42536f;font-weight:600;padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  table.items td{padding:6px 8px;border-bottom:1px solid #f1f5fb}
+  table.items input{padding:5px 8px;border:1px solid #d7dfeb;border-radius:7px;font-family:inherit;font-size:13.5px;width:90px}
+  table.items input.num{width:64px;text-align:center}
+  table.items .del{color:var(--bad);cursor:pointer;font-weight:700}
+  .empty{color:var(--sub);font-size:13px;padding:14px 4px}
+  .totals{display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px dashed var(--line);font-size:14px}
+  .totals .big{font-size:22px;font-weight:800;color:var(--brand)}
+  .fld{display:flex;align-items:center;gap:6px;font-size:13.5px}
+  .fld input,.fld select{padding:7px 9px;border:1px solid #d7dfeb;border-radius:8px;font-family:inherit;font-size:13.5px}
+  .fld input.short{width:76px}
+  .savebar{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center}
+  #btnSave{padding:12px 34px;font-size:16px}
+  .note{font-size:12.5px;color:var(--sub)}
+  .statbar{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 14px;font-size:13px;color:var(--sub)}
+  .stat b{color:var(--ink);font-size:15px}
+  table.recs{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+  table.recs th{background:#f7fafe;color:#42536f;padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  table.recs td{padding:6px 8px;border-bottom:1px solid #f1f5fb}
+  table.recs .op{color:var(--brand);cursor:pointer;margin-right:8px}
+  .tag{display:inline-block;border-radius:999px;padding:1px 10px;font-size:12px}
+  .tag.r{background:#e6f5ec;color:var(--ok)}
+  .tag.p{background:#eef1f6;color:var(--sub)}
+  .warnline{color:var(--bad);font-size:13px;min-height:18px;margin-top:6px}
+  #ticket{display:none}
+  @media print{
+    body *{visibility:hidden}
+    #ticket,#ticket *{visibility:visible}
+    #ticket{display:block;position:absolute;left:0;top:0;width:72mm;padding:0 2mm;font-family:SimSun,monospace;color:#000}
+    .t-center{text-align:center}.t-right{text-align:right}
+    #ticket h2{font-size:16px;margin:4px 0 2px}
+    #ticket table{width:100%;border-collapse:collapse;font-size:11px;margin-top:4px}
+    #ticket td,#ticket th{padding:1px 2px;border-bottom:1px dashed #999;text-align:left}
+    #ticket .tt{font-size:14px;font-weight:bold;margin-top:4px}
+    #ticket .sm{font-size:10px;margin-top:3px;line-height:1.5}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>收衣开单</h1>
+    <span class="sub" id="shopName">洗衣店</span>
+    <div class="right">
+      <button class="btn btn2" id="btnViewer">会员查询</button>
+      <button class="btn btn2" id="btnExport">导出备份</button>
+    </div>
+  </header>
+
+  <div class="statbar" id="statbar"></div>
+
+  <div class="cols">
+    <div class="card">
+      <h3>① 选择会员</h3>
+      <div class="search"><input id="q" placeholder="姓名 / 电话 / 卡号 / 拼音" autocomplete="off"></div>
+      <div class="hits" id="hits"></div>
+      <div class="mbrief" id="mbrief">
+        <span class="clear" id="mClear">清除</span>
+        <div class="n" id="mName">—</div>
+        <div class="row">
+          <span>电话 <b id="mTel">—</b></span>
+          <span>级别 <b id="mLv">—</b></span>
+          <span>卡号 <b id="mCard">—</b></span>
+        </div>
+        <div class="row">
+          <span>账户余额 <b class="bal" id="mBal">—</b></span>
+          <span>卡余额 <b class="bal" id="mCardBal">—</b></span>
+          <span>累计 <b id="mOnum">—</b> 单</span>
+        </div>
+      </div>
+      <div class="note" style="margin-top:10px" id="dataNote"></div>
+    </div>
+
+    <div class="card">
+      <h3>② 录入衣物</h3>
+      <div class="chips" id="chips"></div>
+      <table class="items" id="itemTable" style="display:none">
+        <thead><tr><th style="width:26%">品类</th><th>数量</th><th>单价(元)</th><th>颜色/备注</th><th>小计</th><th></th></tr></thead>
+        <tbody id="itemRows"></tbody>
+      </table>
+      <div class="empty" id="itemEmpty">点击上方品类添加衣物，单价可修改（价格表自动记忆）。</div>
+      <div class="totals">
+        <span>共 <b id="cnt">0</b> 件</span>
+        <span>小计 <b id="sub">￥0.00</b></span>
+        <span class="fld">折扣
+          <select id="disc"><option value="1">无</option><option value="0.95">95折</option><option value="0.9">9折</option><option value="0.88">88折</option><option value="0.8">8折</option></select>
+        </span>
+        <span class="fld">抹零 <input class="short" id="round" type="number" step="0.5" min="0" value="0"></span>
+        <span>应收 <span class="big" id="total">￥0.00</span></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3>③ 完成开单</h3>
+    <div class="savebar">
+      <span class="fld">支付方式
+        <select id="pay"><option>余额</option><option>现金</option><option>微信</option><option>支付宝</option><option>挂账</option></select>
+      </span>
+      <span class="fld">取件日期 <input type="date" id="pickup"></span>
+      <span class="fld">单据备注 <input id="billNote" placeholder="选填" style="width:180px"></span>
+      <button class="btn" id="btnSave">保存并打印小票</button>
+    </div>
+    <div class="warnline" id="warnline"></div>
+    <div class="note">开单只在本页记录并打印小票，不会写入洗衣管家软件；「余额」支付仅供提醒核对，请以软件实际操作为准。</div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3>收衣记录 <span class="note" id="recMeta"></span></h3>
+    <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
+      <input id="recQ" placeholder="筛选：姓名/电话/单号" style="flex:0 0 220px;padding:7px 10px;border:1px solid #d7dfeb;border-radius:8px;font-family:inherit">
+      <button class="btn btn2" id="btnToday">只看今日</button>
+      <button class="btn btn2" id="btnAll">全部</button>
+    </div>
+    <table class="recs"><thead><tr><th>单号</th><th>时间</th><th>会员</th><th>电话</th><th>件数</th><th>金额</th><th>支付</th><th>取件</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody id="recRows"></tbody></table>
+    <div class="empty" id="recEmpty">暂无记录。</div>
+  </div>
+</div>
+
+<div id="ticket"></div>
+
+<script src="../查询页面/data.js"></script>
+<script>
+(function(){
+'use strict';
+var D = window.MEMBER_DATA || null;
+var LS_ORD = 'xygj_intake_orders_v1';
+var LS_PRICE = 'xygj_price_table_v1';
+var CATS = ['外套','大衣','羽绒服','毛衣','衬衫','T恤','裤子','裙子','西装','鞋','包','床单','被套','被芯','枕芯','其他'];
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+function fmt(n){ return (Math.round(n*100)/100).toFixed(2); }
+function load(k,d){ try{ var v=JSON.parse(localStorage.getItem(k)); return v==null?d:v; }catch(e){ return d; } }
+function save(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+var orders = load(LS_ORD, []);
+var prices = load(LS_PRICE, {});
+
+var members = [];
+if (D && D.members) {
+  members = D.members.map(function(m){
+    return { uid:m.uid, name:m.name||'', py:(m.py||'').toLowerCase(), phone:m.phone||'', cardnum:m.cardnum||'',
+      level:m.vip_name||m.vipname||'', balance:(Number(m.balance)||0)/100, cardBal:(Number(m.cardrmb)||0)/100, onum:Number(m.onum)||0 };
+  });
+  if (D.shop) document.getElementById('shopName').textContent = D.shop;
+}
+document.getElementById('dataNote').textContent = members.length
+  ? ('已加载会员数据 ' + members.length + ' 人（' + (D.exportStamp||'') + '）')
+  : '未找到会员数据（查询页 data.js）——可先运行一次导出，或直接临时输入顾客信息开单。';
+
+var sel = null;
+var q = document.getElementById('q'), hits = document.getElementById('hits');
+q.addEventListener('input', function(){
+  var kw = q.value.trim().toLowerCase();
+  if (!kw) { hits.style.display='none'; return; }
+  var arr = members.filter(function(m){
+    return (m.name&&m.name.toLowerCase().indexOf(kw)>=0) || (m.py&&m.py.indexOf(kw)>=0) || (m.phone&&m.phone.indexOf(kw)>=0) || (m.cardnum&&String(m.cardnum).indexOf(kw)>=0);
+  }).slice(0,20);
+  hits.innerHTML = arr.map(function(m){
+    return '<div class="hit" data-uid="'+esc(m.uid)+'"><span><b>'+esc(m.name||'(无名)')+'</b> <span class="tel">'+esc(m.phone)+'</span></span><span class="lv">'+esc(m.level)+' · ￥'+fmt(m.balance)+'</span></div>';
+  }).join('');
+  hits.style.display = arr.length? 'block':'none';
+  Array.prototype.forEach.call(hits.querySelectorAll('.hit'), function(el){
+    el.addEventListener('click', function(){
+      var uid = el.getAttribute('data-uid');
+      pick(members.filter(function(m){return String(m.uid)===String(uid);})[0]);
+    });
+  });
+});
+function pick(m){
+  if (!m) return;
+  sel = m;
+  hits.style.display='none'; q.value='';
+  document.getElementById('mbrief').style.display='block';
+  document.getElementById('mName').textContent = m.name||'(无名)';
+  document.getElementById('mTel').textContent = m.phone||'—';
+  document.getElementById('mLv').textContent = m.level||'—';
+  document.getElementById('mCard').textContent = m.cardnum||'—';
+  document.getElementById('mBal').textContent = '￥'+fmt(m.balance);
+  document.getElementById('mCardBal').textContent = '￥'+fmt(m.cardBal);
+  document.getElementById('mOnum').textContent = m.onum;
+}
+document.getElementById('mClear').addEventListener('click', function(){
+  sel=null; document.getElementById('mbrief').style.display='none';
+});
+
+var items = [];
+var chipsEl = document.getElementById('chips');
+chipsEl.innerHTML = CATS.map(function(c){ return '<span class="chip" data-cat="'+esc(c)+'">'+esc(c)+'</span>'; }).join('');
+Array.prototype.forEach.call(chipsEl.querySelectorAll('.chip'), function(el){
+  el.addEventListener('click', function(){ addCat(el.getAttribute('data-cat')); });
+});
+function addCat(cat){
+  if (prices[cat] === undefined) { var v = prompt('「'+cat+'」默认单价（元）？可随时在明细里修改'); var n = parseFloat(v); if (!isFinite(n)||n<0) n = 0; prices[cat]=n; save(LS_PRICE,prices); }
+  var ex = null;
+  for (var i=0;i<items.length;i++) if (items[i].cat===cat && !items[i].note) { ex = items[i]; break; }
+  if (ex) ex.qty++;
+  else items.push({cat:cat, qty:1, price:prices[cat], note:''});
+  renderItems();
+}
+function renderItems(){
+  var tb = document.getElementById('itemRows');
+  document.getElementById('itemEmpty').style.display = items.length? 'none':'block';
+  document.getElementById('itemTable').style.display = items.length? 'table':'none';
+  tb.innerHTML = items.map(function(it,i){
+    return '<tr><td>'+esc(it.cat)+'</td>'+
+      '<td><input class="num" type="number" min="1" step="1" value="'+it.qty+'" data-i="'+i+'" data-f="qty"></td>'+
+      '<td><input type="number" min="0" step="0.5" value="'+it.price+'" data-i="'+i+'" data-f="price"></td>'+
+      '<td><input type="text" value="'+esc(it.note)+'" placeholder="颜色等" data-i="'+i+'" data-f="note" style="width:130px"></td>'+
+      '<td>￥'+fmt(it.qty*it.price)+'</td>'+
+      '<td><span class="del" data-i="'+i+'">✕</span></td></tr>';
+  }).join('');
+  Array.prototype.forEach.call(tb.querySelectorAll('input'), function(inp){
+    inp.addEventListener('change', function(){
+      var i = +inp.getAttribute('data-i'), f = inp.getAttribute('data-f');
+      if (f==='note') items[i].note = inp.value;
+      else { items[i][f] = parseFloat(inp.value)||0; if (f==='price'){ prices[items[i].cat]=items[i][f]; save(LS_PRICE,prices); } }
+      renderItems();
+    });
+  });
+  Array.prototype.forEach.call(tb.querySelectorAll('.del'), function(d){
+    d.addEventListener('click', function(){ items.splice(+d.getAttribute('data-i'),1); renderItems(); });
+  });
+  var cnt=0, sub=0;
+  items.forEach(function(it){ cnt+=it.qty; sub+=it.qty*it.price; });
+  document.getElementById('cnt').textContent = cnt;
+  document.getElementById('sub').textContent = '￥'+fmt(sub);
+  calc();
+}
+function calc(){
+  var sub=0; items.forEach(function(it){ sub+=it.qty*it.price; });
+  var d = parseFloat(document.getElementById('disc').value)||1;
+  var r = parseFloat(document.getElementById('round').value)||0;
+  var t = Math.max(0, sub*d - r);
+  document.getElementById('total').textContent = '￥'+fmt(t);
+  return t;
+}
+document.getElementById('disc').addEventListener('change', calc);
+document.getElementById('round').addEventListener('input', calc);
+
+function todayKey(){ var d=new Date(); function p(x){return (x<10?'0':'')+x;} return ''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate()); }
+function nextNo(){ var all=load('xygj_seq',{}); var k=todayKey(); all[k]=(all[k]||0)+1; save('xygj_seq',all); return 'R'+k+('00'+all[k]).slice(-3); }
+document.getElementById('pickup').value = (function(){ var d=new Date(); d.setDate(d.getDate()+3); function p(x){return (x<10?'0':'')+x;} return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); })();
+
+document.getElementById('btnSave').addEventListener('click', function(){
+  var warn = document.getElementById('warnline');
+  if (!items.length) { warn.textContent='请先添加衣物。'; return; }
+  var m = sel;
+  var name = m? (m.name||'') : '';
+  var phone = m? (m.phone||'') : '';
+  if (!m) {
+    var mn = document.getElementById('manualName'), mt = document.getElementById('manualTel');
+    name = mn? mn.value.trim() : '';
+    phone = mt? mt.value.trim() : '';
+    if (!name && !phone) { warn.textContent='请先选择会员，或填写临时顾客姓名/电话。'; return; }
+  }
+  var pay = document.getElementById('pay').value;
+  var total = calc();
+  var warnMsg = '';
+  if (pay==='余额' && m && m.balance < total) warnMsg = '提示：会员余额（￥'+fmt(m.balance)+'）不足应收（￥'+fmt(total)+'），请先在软件中充值或改其他支付方式。';
+  var o = {
+    no: nextNo(), ts: new Date().toISOString(),
+    uid: m? m.uid:'', name:name, phone:phone, level:m? (m.level||''):'',
+    items: JSON.parse(JSON.stringify(items)),
+    discount: parseFloat(document.getElementById('disc').value)||1,
+    round: parseFloat(document.getElementById('round').value)||0,
+    total: total, pay: pay,
+    pickup: document.getElementById('pickup').value,
+    note: document.getElementById('billNote').value || '',
+    status:'received', balanceAtSale: m? m.balance : null
+  };
+  orders.unshift(o); save(LS_ORD, orders);
+  printTicket(o);
+  items = []; renderItems();
+  warn.textContent = warnMsg || ('已保存 '+o.no+'（本地记录）。余额支付请到洗衣管家软件操作。');
+  renderStats(); renderRecs();
+});
+
+if (!members.length) {
+  var mb = document.getElementById('mbrief');
+  mb.style.display='block';
+  document.getElementById('mName').textContent = '临时顾客';
+  var r2 = document.createElement('div'); r2.className='row';
+  r2.innerHTML = '<span>姓名 <input id="manualName" style="padding:6px 9px;border:1px solid #d7dfeb;border-radius:8px;font-family:inherit"></span>'+
+    '<span>电话 <input id="manualTel" style="padding:6px 9px;border:1px solid #d7dfeb;border-radius:8px;font-family:inherit"></span>';
+  mb.appendChild(r2);
+}
+
+function printTicket(o){
+  var t = document.getElementById('ticket');
+  var rows = o.items.map(function(it){ return '<tr><td>'+esc(it.cat)+(it.note?('('+esc(it.note)+')'):'')+'</td><td class="t-right">'+it.qty+'</td><td class="t-right">'+fmt(it.price*it.qty)+'</td></tr>'; }).join('');
+  t.innerHTML = '<div class="t-center"><h2>'+esc(document.getElementById('shopName').textContent)+'</h2><div class="sm">收衣单 '+o.no+' '+o.ts.slice(0,10)+'</div></div>'+
+    '<div class="sm">会员：'+esc(o.name||'—')+' '+esc(o.phone||'')+'</div>'+
+    '<div class="sm">取件：'+esc(o.pickup)+'</div>'+
+    '<table><tr><th>品类</th><th style="text-align:right">数</th><th style="text-align:right">金额</th></tr>'+rows+'</table>'+
+    '<div class="sm">'+(o.discount<1?('折扣 '+o.discount+'  '):'')+(o.round?('抹零 '+o.round+'  '):'')+'</div>'+
+    '<div class="tt t-right">应收：￥'+fmt(o.total)+'</div>'+
+    '<div class="sm">支付：'+esc(o.pay)+(o.note?('　备注：'+esc(o.note)):'')+'</div>'+
+    '<div class="sm t-center">请凭此单取件 · 贵重物品请当面确认</div>';
+  setTimeout(function(){ window.print(); }, 60);
+}
+
+function renderStats(){
+  var k = todayKey();
+  var today = orders.filter(function(o){ return o.no.indexOf('R'+k)===0; });
+  var cnt=0, sum=0; today.forEach(function(o){ o.items.forEach(function(i){cnt+=i.qty;}); sum+=o.total; });
+  document.getElementById('statbar').innerHTML =
+    '<span class="stat">今日开单 <b>'+today.length+'</b> 笔</span>'+
+    '<span class="stat">今日件数 <b>'+cnt+'</b></span>'+
+    '<span class="stat">今日金额 <b>￥'+fmt(sum)+'</b></span>'+
+    '<span class="stat">历史累计 <b>'+orders.length+'</b> 笔</span>';
+}
+var recTodayOnly = true;
+function renderRecs(){
+  var kw = (document.getElementById('recQ').value||'').trim().toLowerCase();
+  var k = todayKey();
+  var arr = orders.filter(function(o){
+    if (recTodayOnly && o.no.indexOf('R'+k)!==0) return false;
+    if (kw && ((o.name||'')+' '+(o.phone||'')+' '+o.no).toLowerCase().indexOf(kw)<0) return false;
+    return true;
+  });
+  document.getElementById('recEmpty').style.display = arr.length? 'none':'block';
+  document.getElementById('recMeta').textContent = recTodayOnly? '（今日）':'（全部 '+orders.length+' 笔，最多显示 100 条）';
+  document.getElementById('recRows').innerHTML = arr.slice(0,100).map(function(o){
+    var cnt = 0; o.items.forEach(function(i){cnt+=i.qty;});
+    return '<tr><td>'+esc(o.no)+'</td><td>'+esc(o.ts.slice(5,16).replace('T',' '))+'</td><td>'+esc(o.name||'—')+'</td><td>'+esc(o.phone||'')+'</td>'+
+      '<td>'+cnt+'</td><td>￥'+fmt(o.total)+'</td><td>'+esc(o.pay)+'</td><td>'+esc(o.pickup)+'</td>'+
+      '<td>'+(o.status==='picked'?'<span class="tag p">已取件</span>':'<span class="tag r">已收衣</span>')+'</td>'+
+      '<td><span class="op" data-a="print" data-no="'+esc(o.no)+'">补打</span>'+(o.status==='picked'?'':'<span class="op" data-a="pick" data-no="'+esc(o.no)+'">取件</span>')+'</td></tr>';
+  }).join('');
+  Array.prototype.forEach.call(document.getElementById('recRows').querySelectorAll('.op'), function(el){
+    el.addEventListener('click', function(){
+      var no = el.getAttribute('data-no'), a = el.getAttribute('data-a');
+      var o = null; for (var i=0;i<orders.length;i++) if (orders[i].no===no) { o=orders[i]; break; }
+      if (!o) return;
+      if (a==='pick'){ o.status='picked'; o.pickedAt=new Date().toISOString(); save(LS_ORD,orders); renderRecs(); renderStats(); }
+      else printTicket(o);
+    });
+  });
+}
+document.getElementById('recQ').addEventListener('input', renderRecs);
+document.getElementById('btnToday').addEventListener('click', function(){ recTodayOnly=true; renderRecs(); });
+document.getElementById('btnAll').addEventListener('click', function(){ recTodayOnly=false; renderRecs(); });
+
+document.getElementById('btnExport').addEventListener('click', function(){
+  var blob = new Blob([JSON.stringify(orders)], {type:'application/json'});
+  var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = '收衣记录备份_'+todayKey()+'.json'; a.click();
+});
+document.getElementById('btnViewer').addEventListener('click', function(){ location.href='../查询页面/index.html'; });
+
+renderItems(); renderStats(); renderRecs();
+})();
+</script>
+</body>
+</html>

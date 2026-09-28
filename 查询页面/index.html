@@ -135,7 +135,7 @@
     <h1>会员数据查询台</h1>
     <div class="meta" id="metaChips"></div>
     <div class="spacer"></div>
-    <button class="btn" id="btnCsv">导出筛选结果 CSV</button>
+    <button class="btn" id="btnCsv">导出筛选结果 CSV</button> <button class="btn" id="btnIntake" title="前台收衣开单">收衣开单</button>
   </div>
   <div class="toolbar">
     <div class="search">
@@ -597,7 +597,8 @@
       document.getElementById('fSize').addEventListener('change',function(){ state.size=parseInt(this.value,10)||50; state.page=1; render(); });
       function num(el,key){ el.addEventListener('input',function(){ var v=el.value===''?null:parseFloat(el.value); state[key]=(v==null||isNaN(v))?null:v; state.page=1; render(); }); }
       num(document.getElementById('balMin'),'balMin'); num(document.getElementById('balMax'),'balMax');
-      document.getElementById('btnCsv').addEventListener('click',exportCsv);
+      document.getElementById('btnIntake').addEventListener('click', function(){ location.href='../收衣页面/index.html'; });
+    document.getElementById('btnCsv').addEventListener('click',exportCsv);
     }
     function exportCsv(){
       var arr=filtered(); if(!arr.length){ toast('当前没有可导出的数据'); return; }
