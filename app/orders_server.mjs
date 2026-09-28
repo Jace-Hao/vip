@@ -464,6 +464,66 @@ async function statusPayload() {
   };
 }
 
+/* ---------------- 收衣系统（本地化收银） ---------------- */
+const SHOP_DIR = path.join(ROOT, '收衣数据');
+const SHOP_ORDERS = path.join(SHOP_DIR, 'orders.json');
+const SHOP_LOCAL = path.join(SHOP_DIR, 'members_local.json');
+const SHOP_LEDGER = path.join(SHOP_DIR, 'ledger.jsonl');
+const SHOP_SEQ = path.join(SHOP_DIR, 'seq.json');
+function shopRead(f, d) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return d; } }
+function shopWrite(f, obj) { try { fs.mkdirSync(SHOP_DIR, { recursive: true }); } catch (e) {} const tmp = f + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(obj)); try { fs.renameSync(tmp, f); } catch (e) { fs.writeFileSync(f, JSON.stringify(obj)); } }
+function shopLedger(e) { try { fs.mkdirSync(SHOP_DIR, { recursive: true }); fs.appendFileSync(SHOP_LEDGER, JSON.stringify(e) + '\n'); } catch (err) {} }
+function shopSeq(prefix) { const all = shopRead(SHOP_SEQ, {}); const k = prefix + todayStr().replace(/-/g, ''); all[k] = (all[k] || 0) + 1; shopWrite(SHOP_SEQ, all); return k + ('000' + all[k]).slice(-3); }
+
+let memberCache = null, memberCacheM = 0;
+function baseMembers() {
+  try {
+    const f = path.join(ROOT, '查询页面', 'data.js');
+    const mt = fs.statSync(f).mtimeMs;
+    if (memberCache && memberCacheM === mt) return memberCache;
+    const raw = fs.readFileSync(f, 'utf8');
+    const j = JSON.parse(raw.replace(/^window\.MEMBER_DATA=/, '').replace(/;\s*$/, ''));
+    const arr = (j.members || []).map((m) => ({ uid: String(m.uid), name: m.name || '', py: (m.py || '').toLowerCase(), phone: m.phone || '', cardnum: m.cardnum || '', level: m.vip_name || m.vipname || '', baseBalance: (Number(m.balance) || 0) / 100, cardBal: (Number(m.cardrmb) || 0) / 100, onum: Number(m.onum) || 0, local: false }));
+    memberCache = { shop: j.shop || '', stamp: j.exportStamp || '', members: arr };
+    memberCacheM = mt;
+    return memberCache;
+  } catch (e) { return memberCache || { shop: '', stamp: '', members: [] }; }
+}
+function localStore() { const L = shopRead(SHOP_LOCAL, null); return (L && typeof L === 'object') ? L : { deltas: {}, locals: {}, edits: {} }; }
+function saveLocal(L) { shopWrite(SHOP_LOCAL, L); }
+function shopMembers(kw) {
+  const L = localStore();
+  const base = baseMembers();
+  let arr = base.members.map((m) => {
+    const ed = L.edits[m.uid] || {};
+    return { uid: m.uid, name: ed.name || m.name, py: m.py, phone: ed.phone || m.phone, cardnum: m.cardnum, level: ed.level || m.level, baseBalance: m.baseBalance, cardBal: m.cardBal, onum: m.onum, local: false, delta: L.deltas[m.uid] || 0, balance: m.baseBalance + (L.deltas[m.uid] || 0) };
+  });
+  for (const uid of Object.keys(L.locals || {})) {
+    const lm = L.locals[uid];
+    arr.push({ uid: uid, name: lm.name || '', py: (lm.name || '').toLowerCase(), phone: lm.phone || '', cardnum: '', level: lm.level || '散客', baseBalance: lm.balance0 || 0, cardBal: 0, onum: 0, local: true, delta: L.deltas[uid] || 0, balance: (lm.balance0 || 0) + (L.deltas[uid] || 0) });
+  }
+  if (kw) { kw = String(kw).toLowerCase(); arr = arr.filter((m) => { const nm = String(m.name || '').toLowerCase(), py = String(m.py || ''), ph = String(m.phone || ''), cd = String(m.cardnum || ''); return nm.includes(kw) || py.includes(kw) || ph.includes(kw) || cd.includes(kw); }); }
+  return { shop: base.shop, stamp: base.stamp, members: arr };
+}
+function balanceOf(uid) { const ms = shopMembers().members; const m = ms.filter((x) => x.uid === String(uid))[0]; return m ? m.balance : null; }
+function applyDelta(uid, d) { const L = localStore(); L.deltas[uid] = (L.deltas[uid] || 0) + d; saveLocal(L); }
+function shopOrders() { return shopRead(SHOP_ORDERS, []); }
+function saveOrders(a) { shopWrite(SHOP_ORDERS, a); }
+function orderPieces(o) { let n = 0; (o.items || []).forEach((i) => { n += Number(i.qty) || 0; }); return n; }
+const SHOP_STATUS = { received: '已收衣', washing: '洗涤中', done: '已完成', picked: '已取件' };
+function shopStats() {
+  const orders = shopOrders();
+  const k = todayStr();
+  const month = k.slice(0, 7);
+  const calc = (list) => { let bills = list.length, pieces = 0, revenue = 0, due = 0; const payMap = {}; list.forEach((o) => { pieces += orderPieces(o); if (o.payStatus !== 'due') revenue += o.total; else due += o.total; payMap[o.pay] = (payMap[o.pay] || 0) + o.total; }); return { bills, pieces, revenue: Math.round(revenue * 100) / 100, due: Math.round(due * 100) / 100, payMap }; };
+  const today = calc(orders.filter((o) => (o.no || '').indexOf('R' + k.replace(/-/g, '')) === 0));
+  const monthL = calc(orders.filter((o) => (o.no || '').indexOf('R' + month.replace(/-/g, '')) === 0));
+  let reToday = 0, reMonth = 0;
+  try { for (const ln of fs.readFileSync(SHOP_LEDGER, 'utf8').split(/\r?\n/)) { if (!ln) continue; try { const e = JSON.parse(ln); if (e.type === '充值') { const d = (e.ts || '').slice(0, 10); if (d === k) reToday += (e.amount || 0) + (e.bonus || 0); if (d && d.slice(0, 7) === month) reMonth += (e.amount || 0) + (e.bonus || 0); } } catch (er) {} } } catch (e) {}
+  const openCount = orders.filter((o) => o.status !== 'picked').length;
+  return { today, month: monthL, rechargeToday: Math.round(reToday * 100) / 100, rechargeMonth: Math.round(reMonth * 100) / 100, openCount };
+}
+
 /* ---------------- HTTP ---------------- */
 function sendJson(res, obj, code = 200) {
   const body = JSON.stringify(obj);
@@ -504,6 +564,23 @@ const server = http.createServer(async (req, res) => {
       res.end(html);
       return;
     }
+    /* ---- 静态页面：/shop（收衣系统）与 查询页面 / 收衣页面 目录 ---- */
+    if (req.method === 'GET' && (p === '/shop' || p === '/shop/')) {
+      const f = path.join(ROOT, '收衣页面', 'index.html');
+      try { const html = fs.readFileSync(f, 'utf8'); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(html); } catch (e) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('收衣页面文件缺失'); }
+      return;
+    }
+    if (req.method === 'GET' && (p.startsWith('/查询页面/') || p.startsWith('/收衣页面/'))) {
+      const rel = decodeURIComponent(p.slice(1));
+      const abs = path.normalize(path.join(ROOT, rel));
+      if (abs.startsWith(path.normalize(ROOT)) && fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+        const ext = path.extname(abs).toLowerCase();
+        const mime = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.json': 'application/json; charset=utf-8' }[ext] || 'application/octet-stream';
+        res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-store' });
+        res.end(fs.readFileSync(abs));
+      } else { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('not found'); }
+      return;
+    }
     if (req.method === 'GET' && p === '/api/status') { sendJson(res, await statusPayload()); return; }
     if (req.method === 'POST' && p === '/api/start') {
       const body = await readBody(req);
@@ -536,6 +613,147 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { ok: true });
       return;
     }
+    /* ---- 收衣系统 API ---- */
+    if (p === '/api/shop/members' && req.method === 'GET') { sendJson(res, shopMembers(u.searchParams.get('kw') || '')); return; }
+    if (p === '/api/shop/orders' && req.method === 'GET') {
+      const kw = (u.searchParams.get('kw') || '').toLowerCase();
+      const st = u.searchParams.get('status') || '';
+      let arr = shopOrders();
+      if (st) arr = arr.filter((o) => o.status === st);
+      if (kw) arr = arr.filter((o) => ((o.name || '') + ' ' + (o.phone || '') + ' ' + o.no).toLowerCase().includes(kw));
+      sendJson(res, { orders: arr.slice(0, 300), statusText: SHOP_STATUS });
+      return;
+    }
+    if (p === '/api/shop/order/create' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (!Array.isArray(b.items) || !b.items.length) { sendJson(res, { error: '衣物明细为空' }, 400); return; }
+      let sub = 0, pieces = 0;
+      for (const it of b.items) { const q = Number(it.qty) || 0, pr = Number(it.price) || 0; if (q <= 0) { sendJson(res, { error: '数量必须大于 0' }, 400); return; } sub += q * pr; pieces += q; }
+      const disc = Number(b.discount) || 1, rnd = Number(b.round) || 0;
+      const total = Math.max(0, Math.round((sub * disc - rnd) * 100) / 100);
+      const uid = String(b.uid || '');
+      const pay = String(b.pay || '现金');
+      let balanceAfter = null;
+      if (pay === '余额') {
+        const bal = uid ? balanceOf(uid) : null;
+        if (bal == null) { sendJson(res, { error: '会员不存在，无法余额支付' }, 400); return; }
+        if (bal < total) { sendJson(res, { error: '余额不足（当前 ￥' + bal.toFixed(2) + '，应收 ￥' + total.toFixed(2) + '）' }, 400); return; }
+      }
+      const o = {
+        no: shopSeq('R'), ts: new Date().toISOString(),
+        uid: uid, name: b.name || '', phone: b.phone || '', level: b.level || '',
+        items: b.items, pieces, discount: disc, round: rnd, total, pay,
+        payStatus: pay === '挂账' ? 'due' : 'paid',
+        pickup: b.pickup || '', note: b.note || '',
+        status: 'received', balanceAfter: null,
+      };
+      if (pay === '余额') { applyDelta(uid, -total); o.balanceAfter = balanceOf(uid); shopLedger({ ts: o.ts, uid: uid, name: b.name || '', type: '消费', amount: -total, pay: '余额', no: o.no }); }
+      const arr = shopOrders(); arr.unshift(o); saveOrders(arr);
+      sendJson(res, { ok: true, order: o });
+      return;
+    }
+    if (p === '/api/shop/order/status' && req.method === 'POST') {
+      const b = await readBody(req);
+      const arr = shopOrders(); const o = arr.filter((x) => x.no === b.no)[0];
+      if (!o) { sendJson(res, { error: '订单不存在' }, 404); return; }
+      const flow = { received: ['washing', 'done', 'picked'], washing: ['done', 'picked'], done: ['picked'], picked: [] };
+      if (!(flow[o.status] || []).includes(b.status)) { sendJson(res, { error: '不允许的状态流转：' + (SHOP_STATUS[o.status] || o.status) + ' → ' + (SHOP_STATUS[b.status] || b.status) }, 400); return; }
+      if (b.status === 'picked' && o.payStatus === 'due') { sendJson(res, { error: '该单为挂账单，请先结算收款' }, 400); return; }
+      o.status = b.status; if (b.status === 'picked') o.pickedAt = new Date().toISOString();
+      saveOrders(arr);
+      sendJson(res, { ok: true, order: o });
+      return;
+    }
+    if (p === '/api/shop/order/settle' && req.method === 'POST') {
+      const b = await readBody(req);
+      const arr = shopOrders(); const o = arr.filter((x) => x.no === b.no)[0];
+      if (!o) { sendJson(res, { error: '订单不存在' }, 404); return; }
+      if (o.payStatus !== 'due') { sendJson(res, { error: '该单已结清' }, 400); return; }
+      const pay = String(b.pay || '现金');
+      if (pay === '余额') {
+        const bal = o.uid ? balanceOf(o.uid) : null;
+        if (bal == null) { sendJson(res, { error: '会员不存在，无法余额支付' }, 400); return; }
+        if (bal < o.total) { sendJson(res, { error: '余额不足（当前 ￥' + bal.toFixed(2) + '）' }, 400); return; }
+        applyDelta(o.uid, -o.total); o.balanceAfter = balanceOf(o.uid);
+        shopLedger({ ts: new Date().toISOString(), uid: o.uid, name: o.name || '', type: '消费', amount: -o.total, pay: '余额', no: o.no });
+      }
+      o.pay = pay; o.payStatus = 'paid'; o.settledAt = new Date().toISOString();
+      if (o.status !== 'picked') { o.status = 'picked'; o.pickedAt = o.settledAt; }
+      saveOrders(arr);
+      sendJson(res, { ok: true, order: o });
+      return;
+    }
+    if (p === '/api/shop/recharge' && req.method === 'POST') {
+      const b = await readBody(req);
+      const uid = String(b.uid || '');
+      const amount = Math.round((Number(b.amount) || 0) * 100) / 100;
+      const bonus = Math.round((Number(b.bonus) || 0) * 100) / 100;
+      if (amount <= 0) { sendJson(res, { error: '充值金额必须大于 0' }, 400); return; }
+      if (balanceOf(uid) == null) { sendJson(res, { error: '会员不存在' }, 404); return; }
+      applyDelta(uid, amount + bonus);
+      const no = shopSeq('C');
+      const entry = { ts: new Date().toISOString(), uid: uid, name: b.name || '', type: '充值', amount, bonus, pay: b.pay || '现金', no };
+      shopLedger(entry);
+      sendJson(res, { ok: true, no, balance: balanceOf(uid) });
+      return;
+    }
+    if (p === '/api/shop/member/create' && req.method === 'POST') {
+      const b = await readBody(req);
+      const name = String(b.name || '').trim();
+      if (!name) { sendJson(res, { error: '姓名不能为空' }, 400); return; }
+      const uid = 'L' + Date.now();
+      const L = localStore();
+      L.locals[uid] = { name, phone: String(b.phone || ''), level: String(b.level || '散客'), balance0: Math.round((Number(b.balance0) || 0) * 100) / 100, createdAt: new Date().toISOString() };
+      saveLocal(L);
+      if (L.locals[uid].balance0 > 0) { shopLedger({ ts: new Date().toISOString(), uid, name, type: '充值', amount: L.locals[uid].balance0, bonus: 0, pay: '建档充值', no: shopSeq('C') }); }
+      sendJson(res, { ok: true, uid, balance: balanceOf(uid) });
+      return;
+    }
+    if (p === '/api/shop/member/update' && req.method === 'POST') {
+      const b = await readBody(req);
+      const uid = String(b.uid || '');
+      if (balanceOf(uid) == null && uid[0] !== 'L') { sendJson(res, { error: '会员不存在' }, 404); return; }
+      const L = localStore();
+      L.edits[uid] = Object.assign(L.edits[uid] || {}, { name: b.name !== undefined ? String(b.name) : (L.edits[uid] || {}).name, phone: b.phone !== undefined ? String(b.phone) : (L.edits[uid] || {}).phone, level: b.level !== undefined ? String(b.level) : (L.edits[uid] || {}).level });
+      if (uid[0] === 'L' && L.locals[uid]) { if (b.name !== undefined) L.locals[uid].name = String(b.name); if (b.phone !== undefined) L.locals[uid].phone = String(b.phone); if (b.level !== undefined) L.locals[uid].level = String(b.level); }
+      saveLocal(L);
+      sendJson(res, { ok: true });
+      return;
+    }
+    if (p === '/api/shop/ledger' && req.method === 'GET') {
+      const uid = u.searchParams.get('uid') || '';
+      let arr = [];
+      try { for (const ln of fs.readFileSync(SHOP_LEDGER, 'utf8').split(/\r?\n/)) { if (!ln) continue; try { const e = JSON.parse(ln); if (!uid || e.uid === uid) arr.push(e); } catch (er) {} } } catch (e) {}
+      sendJson(res, { ledger: arr.slice(-300).reverse(), total: arr.length });
+      return;
+    }
+    if (p === '/api/shop/stats' && req.method === 'GET') { sendJson(res, shopStats()); return; }
+    if (p === '/api/shop/bootstrap' && req.method === 'GET') {
+      const ms = shopMembers();
+      sendJson(res, { shop: ms.shop, stamp: ms.stamp, count: ms.members.length, stats: shopStats() });
+      return;
+    }
+    if (p === '/api/shop/import' && req.method === 'POST') {
+      const b = await readBody(req);
+      const inc = Array.isArray(b.orders) ? b.orders : [];
+      const arr = shopOrders();
+      const have = new Set(arr.map((o) => o.no));
+      let n = 0;
+      for (const o of inc) { if (o && o.no && !have.has(o.no)) { arr.push(Object.assign({ status: o.status === 'picked' ? 'picked' : (o.status || 'received'), payStatus: o.pay === '挂账' ? 'due' : 'paid' }, o)); n++; } }
+      arr.sort((x, y) => (y.ts || '').localeCompare(x.ts || ''));
+      saveOrders(arr);
+      sendJson(res, { ok: true, imported: n, total: arr.length });
+      return;
+    }
+    if (p === '/api/shop/export' && req.method === 'GET') {
+      const rows = [['单号','时间','会员','电话','级别','件数','折扣','抹零','应收','支付','结算','状态','取件日期','备注']];
+      for (const o of shopOrders()) rows.push([o.no, o.ts, o.name, o.phone, o.level, orderPieces(o), o.discount, o.round, o.total, o.pay, o.payStatus === 'due' ? '挂账' : '已结', SHOP_STATUS[o.status] || o.status, o.pickup, o.note]);
+      const csv = '\ufeff' + rows.map((r) => r.map((c) => '"' + String(c == null ? '' : c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename=orders.csv', 'Cache-Control': 'no-store' });
+      res.end(csv);
+      return;
+    }
+
     sendJson(res, { error: 'not found' }, 404);
   } catch (e) {
     sendJson(res, { error: (e && e.message) || String(e) }, 500);
