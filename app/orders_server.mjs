@@ -35,6 +35,23 @@ const TOKEN_FILE = path.join(ROOT, '.console_token.txt');
 const APP_EXE = 'D:\\Blending_Release-6.1.17\\xygjwinapp.exe';
 const SHUTDOWN_DELAY = 120; // 同步完成后延迟关机秒数（期间可取消）
 
+/* 辅助进程完整环境块：服务可能从精简环境拉起，缺 COMPUTERNAME 等变量会导致 shutdown/taskkill 等系统工具报 203/128 */
+const SHUTDOWN_ENV = (() => {
+  const env = { ...process.env };
+  const defaults = {
+    COMPUTERNAME: process.env.COMPUTERNAME || os.hostname(),
+    SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', SystemDrive: 'C:',
+    ComSpec: 'C:\\Windows\\system32\\cmd.exe', OS: 'Windows_NT',
+    PATHEXT: '.COM;.EXE;.BAT;.CMD', TEMP: 'C:\\Windows\\TEMP', TMP: 'C:\\Windows\\TEMP',
+    ALLUSERSPROFILE: 'C:\\ProgramData', PUBLIC: 'C:\\Users\\Public', ProgramData: 'C:\\ProgramData',
+  };
+  for (const k of Object.keys(defaults)) if (!env[k]) env[k] = defaults[k];
+  return env;
+})();
+const SHUTDOWN_EXE = 'C:\\Windows\\System32\\shutdown.exe';
+const HELPER_ENV = SHUTDOWN_ENV; /* taskkill/tasklist/powershell 等辅助进程同样需要 */
+const PWSH = fs.existsSync('C:\\Program Files\\PowerShell\\7\\pwsh.exe') ? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' : 'powershell';
+
 let child = null;
 let childKind = null; // deep | orders
 let phase = 'idle';   // idle | deep | orders | paused | done | failed
@@ -153,35 +170,51 @@ async function cdpOk(timeoutMs) {
   try { await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(timeoutMs || 2000) }); return true; } catch (e) { return false; }
 }
 
-/* 确保洗衣管家以调试模式运行；必要时自动重启软件 */
-async function ensureDebugApp() {
+/* 确保洗衣管家以调试模式运行；必要时自动重启软件（带进程退出验证与并发去重） */
+const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+function appProcCount() {
+  return new Promise((resolve) => {
+    let out = '';
+    const ch = spawn('tasklist', ['/FI', 'IMAGENAME eq xygjwinapp.exe', '/FO', 'CSV', '/NH'], { stdio: ['ignore', 'pipe', 'ignore'], env: HELPER_ENV });
+    ch.stdout.on('data', (d) => { out += d.toString(); });
+    ch.on('exit', () => { resolve((out.match(/xygjwinapp/gi) || []).length); });
+    ch.on('error', () => resolve(0));
+  });
+}
+let ensurePromise = null;
+function ensureDebugApp() {
+  if (ensurePromise) { pushLog('调试模式检查已在进行中，等待上一次检查完成...'); return ensurePromise; }
+  ensurePromise = doEnsureDebugApp().finally(() => { ensurePromise = null; });
+  return ensurePromise;
+}
+async function doEnsureDebugApp() {
   if (await cdpOk()) return true;
   pushLog('调试端口未就绪，自动重启洗衣管家（调试模式）...');
-  await new Promise((resolve) => { const ch = spawn('taskkill', ['/F', '/IM', 'xygjwinapp.exe'], { stdio: 'ignore' }); ch.on('exit', resolve); ch.on('error', resolve); });
-  await new Promise((r) => setTimeout(r, 2000));
   if (!fs.existsSync(APP_EXE)) { pushLog('[错误] 找不到洗衣管家主程序：' + APP_EXE); return false; }
-  try { spawn('cmd.exe', ['/c', 'start', '', APP_EXE, '--remote-debugging-port=9222'], { cwd: path.dirname(APP_EXE), stdio: 'ignore', detached: true }); } catch (e) { pushLog('[错误] 启动洗衣管家失败：' + e.message); return false; }
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 3000));
+  /* 1) 结束现有实例：温和 → taskkill 强杀 → PowerShell 兜底，每步验证进程真正退出 */
+  let killed = false;
+  /* 首选 PowerShell Stop-Process（实测对洗衣管家有效；taskkill 会报拒绝访问），全部带完整环境块 */
+  await new Promise((resolve) => { const ch = spawn(PWSH, ['-NoProfile', '-Command', 'Stop-Process -Name xygjwinapp -Force -ErrorAction SilentlyContinue'], { stdio: 'ignore', env: HELPER_ENV }); ch.on('exit', resolve); ch.on('error', resolve); });
+  for (let i = 0; i < 10 && !killed; i++) { await nap(1000); if ((await appProcCount()) === 0) killed = true; }
+  if (!killed) {
+    pushLog('PowerShell 强制结束未生效，改用 taskkill ...');
+    const rc = await new Promise((resolve) => { const ch = spawn('taskkill', ['/F', '/T', '/IM', 'xygjwinapp.exe'], { stdio: 'ignore', env: HELPER_ENV }); ch.on('exit', (c) => resolve(c)); ch.on('error', () => resolve(-1)); });
+    for (let i = 0; i < 8 && !killed; i++) { await nap(1000); if ((await appProcCount()) === 0) killed = true; }
+    if (!killed) pushLog('taskkill 亦未成功（退出码 ' + rc + '）');
+  }
+  if (!killed) { pushLog('[错误] 洗衣管家无法自动关闭（可能弹有确认框或被占用）。请手动完全退出软件后，再点「开始抓取」。'); return false; }
+  pushLog('洗衣管家已退出，正在以调试模式重新启动...');
+  await nap(1500);
+  /* 2) 调试模式启动并等待端口就绪 */
+  try { spawn('cmd.exe', ['/c', 'start', '', APP_EXE, '--remote-debugging-port=9222'], { cwd: path.dirname(APP_EXE), stdio: 'ignore', detached: true, env: HELPER_ENV }); } catch (e) { pushLog('[错误] 启动洗衣管家失败：' + e.message); return false; }
+  for (let i = 0; i < 40; i++) {
+    await nap(3000);
     if (await cdpOk(1500)) { pushLog('洗衣管家已进入调试模式。'); return true; }
   }
-  pushLog('[错误] 等待洗衣管家调试端口超时（90 秒）。');
+  pushLog('[错误] 等待洗衣管家调试端口超时（120 秒）。请确认软件已打开并登录，或手动用「以调试模式启动洗衣管家.cmd」重开。');
   return false;
 }
 
-/* 关机命令需要完整的环境块（缺 COMPUTERNAME 等变量时 shutdown.exe 会报 203 静默失败） */
-const SHUTDOWN_ENV = (() => {
-  const env = { ...process.env };
-  const defaults = {
-    COMPUTERNAME: process.env.COMPUTERNAME || os.hostname(), SystemRoot: 'C:\\Windows', windir: 'C:\\Windows', SystemDrive: 'C:',
-    ComSpec: 'C:\\Windows\\system32\\cmd.exe', OS: 'Windows_NT',
-    PATHEXT: '.COM;.EXE;.BAT;.CMD', TEMP: 'C:\\Windows\\TEMP', TMP: 'C:\\Windows\\TEMP',
-    ALLUSERSPROFILE: 'C:\\ProgramData', PUBLIC: 'C:\\Users\Public', ProgramData: 'C:\\ProgramData',
-  };
-  for (const k of Object.keys(defaults)) if (!env[k]) env[k] = defaults[k];
-  return env;
-})();
-const SHUTDOWN_EXE = 'C:\\Windows\\System32\\shutdown.exe';
 
 function doShutdown() {
   if (shutdownPending) return;
