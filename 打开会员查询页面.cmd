@@ -5,6 +5,7 @@ title 会员查询页面
 
 rem ---- 刷新查询页数据（Python）----
 set "PY_EXE="
+if exist "%~dp0Python\bin\python.exe" set "PY_EXE=%~dp0Python\bin\python.exe"
 if exist "%LOCALAPPDATA%\Python\bin\python.exe" set "PY_EXE=%LOCALAPPDATA%\Python\bin\python.exe"
 if not defined PY_EXE for /f "delims=" %%i in ('where py 2^>nul') do if not defined PY_EXE set "PY_EXE=%%i"
 if not defined PY_EXE for /f "delims=" %%i in ('where python 2^>nul') do if not defined PY_EXE set "PY_EXE=%%i"
