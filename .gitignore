@@ -8,3 +8,4 @@ __pycache__/
 .sync_schedule.json
 .console_token.txt
 app/cloudflared.exe
+Python/
