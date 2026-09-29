@@ -552,7 +552,7 @@ const server = http.createServer(async (req, res) => {
     const tokQ = u.searchParams ? u.searchParams.get('token') : null;
     if (req.method === 'GET' && tokQ != null && tokQ !== '') {
       if (tokQ === CONSOLE_TOKEN) {
-        res.writeHead(302, { 'Set-Cookie': 'xconsole=' + encodeURIComponent(CONSOLE_TOKEN) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000', Location: '/' });
+        res.writeHead(302, { 'Set-Cookie': 'xconsole=' + encodeURIComponent(CONSOLE_TOKEN) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000', Location: u.pathname });
         res.end();
       } else { sendLoginPage(res, '口令不正确，请重新输入'); }
       return;

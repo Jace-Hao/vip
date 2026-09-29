@@ -207,6 +207,15 @@
 <script>
 (function(){
 'use strict';
+/* FILE_MODE: file:// 直开无法访问本地服务，给出明确引导 */
+if (location.protocol === 'file:') {
+  document.body.innerHTML = '<div style="max-width:520px;margin:80px auto;background:#fff;border:1px solid #e2e6ee;border-radius:12px;padding:34px 38px;font:14px/1.8 Microsoft YaHei,sans-serif">'+
+    '<h2 style="margin:0 0 10px;font-size:19px">请从本地服务打开收衣系统</h2>'+
+    '<p style="color:#5b6675;margin:0 0 14px">当前是以文件方式直接打开的页面，无法读取会员数据（需要本地服务）。<br>请关闭本页，双击工具目录里的 <b style="color:#2b54a8">打开收衣页面.cmd</b> 即可正常使用。</p>'+
+    '<button onclick="location.href='http://127.0.0.1:8791/shop/'" style="padding:10px 22px;border:0;border-radius:9px;background:#2b54a8;color:#fff;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit">尝试跳转服务页面</button>'+
+    '<div style="color:#8a94a6;font-size:12.5px;margin-top:12px">若跳转后要求输入口令，见工具目录 .console_token.txt</div></div>';
+  return;
+}
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 function fmt(n){ return (Math.round((Number(n)||0)*100)/100).toFixed(2); }
 function toast(m){ var t=document.getElementById('toast'); t.textContent=m; t.style.opacity='.95'; clearTimeout(t._tm); t._tm=setTimeout(function(){t.style.opacity='0';},2600); }
