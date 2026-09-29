@@ -542,7 +542,8 @@ function readBody(req) {
 
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://127.0.0.1');
-  const p = u.pathname;
+  let p = u.pathname;
+  try { p = decodeURIComponent(p); } catch (e) { /* 保留原路径 */ }
   try {
     if (!checkAuth(req)) {
       if (p.startsWith('/api/')) { sendJson(res, { error: '需要访问口令' }, 401); return; }
