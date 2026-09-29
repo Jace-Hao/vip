@@ -9,3 +9,5 @@ __pycache__/
 .console_token.txt
 app/cloudflared.exe
 Python/
+桌面程序/node_modules/
+桌面程序/dist/
