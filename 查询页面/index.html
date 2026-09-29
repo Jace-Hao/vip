@@ -163,7 +163,7 @@
     <h1>会员数据查询台</h1>
     <div class="meta" id="metaChips"></div>
     <div class="spacer"></div>
-    <button class="btn" id="btnCsv">导出筛选结果 CSV</button>
+    <button class="btn" id="btnCsv">导出筛选结果 CSV</button> <button class="btn" id="btnHome" title="工具箱总入口">控制中心</button>
   </div>
 <section class="hero" id="heroOverview">
     <div class="hero-head"><h2>会员数据概览</h2><span class="sub" id="ovSub">—</span></div>
@@ -708,6 +708,7 @@ window.__renderOverview = function (members, D) {
       function num(el,key){ el.addEventListener('input',function(){ var v=el.value===''?null:parseFloat(el.value); state[key]=(v==null||isNaN(v))?null:v; state.page=1; render(); }); }
       num(document.getElementById('balMin'),'balMin'); num(document.getElementById('balMax'),'balMax');
 
+    document.getElementById('btnHome').addEventListener('click', function(){ location.href='/home/'; });
     document.getElementById('btnCsv').addEventListener('click',exportCsv);
     }
     function exportCsv(){

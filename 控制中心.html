@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>控制中心</title>
+<style>
+:root{
+  --bg-page:#F7F8FA; --card:#FFFFFF; --bg-dark:#0F1725; --bg-dark-card:#16213A; --bg-dark-card2:#1C2A47;
+  --primary-dark:#87BBE3; --primary:#3E7CC0; --primary-deep:#2E629B;
+  --amber:#F4A325; --coral:#FC5C3C; --yellow:#FCD82B; --green:#329B6D;
+  --tint:#CFD6E1; --stroke-dark:rgba(135,187,227,.25);
+  --text-strong:#0F1725; --text-body:#3D4A5C; --text-sub:#8A94A6;
+  --stroke:#E3E8F0;
+  --shadow:0 1px 2px rgba(15,23,37,.06), 0 2px 8px rgba(15,23,37,.06);
+  --shadow2:0 4px 16px rgba(15,23,37,.12);
+  --font-num:"DIN Alternate","Barlow Condensed","Rajdhani","PingFang SC",sans-serif;
+  --font-sans:"PingFang SC","HarmonyOS Sans SC","Source Han Sans SC","Microsoft YaHei",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-page);color:var(--text-body);font:14px/1.6 var(--font-sans)}
+.wrap{max-width:1100px;margin:0 auto;padding:0 18px 60px}
+/* 深色大屏头 */
+.hero{background:var(--bg-dark);border-radius:0 0 12px 12px;padding:26px 22px 22px;color:#fff}
+.hero .inner{max-width:1100px;margin:0 auto}
+.hero h1{margin:0;font-size:22px;font-weight:600;letter-spacing:.5px}
+.hero .sub{color:var(--tint);font-size:13px;margin-top:4px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.chip{background:var(--bg-dark-card);border:1px solid var(--stroke-dark);border-radius:999px;padding:4px 14px;font-size:12.5px;color:var(--tint)}
+.chip b{color:#fff}
+.chip.bad{border-color:rgba(252,92,60,.5);color:#ffb3a3}
+.chip.bad b{color:#FC5C3C}
+.chip.ok b{color:#7fd4ab}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;margin-top:24px}
+.tile{background:var(--card);border:1px solid var(--stroke);border-radius:8px;padding:16px 18px;box-shadow:var(--shadow);transition:150ms ease-out;display:flex;flex-direction:column;gap:8px}
+.tile:hover{box-shadow:var(--shadow2);transform:translateY(-2px)}
+.tile .ic{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:#EAF2FB}
+.tile .ic svg{width:19px;height:19px;stroke:var(--primary-deep);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.tile h3{margin:0;font-size:15px;color:var(--text-strong)}
+.tile p{margin:0;font-size:12.5px;color:var(--text-sub);flex:1}
+.tile .acts{display:flex;gap:8px;flex-wrap:wrap}
+button{border:0;border-radius:6px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;transition:150ms ease-out}
+button:disabled{opacity:.45;cursor:not-allowed}
+.b-pri{background:var(--primary);color:#fff}
+.b-pri:hover:not(:disabled){background:var(--primary-deep)}
+.b-sec{background:#fff;color:var(--primary-deep);border:1px solid var(--stroke)}
+.b-sec:hover:not(:disabled){border-color:var(--primary)}
+.b-dan{background:#fff;color:var(--coral);border:1px solid #F6C9BF}
+.b-dan:hover:not(:disabled){background:#FDEEEA}
+.state{font-size:12px;color:var(--text-sub)}
+.state b{color:var(--text-strong)}
+.st-ok{color:var(--green)} .st-bad{color:var(--coral)} .st-warn{color:var(--amber)}
+.log{background:var(--bg-dark);border:1px solid var(--stroke-dark);border-radius:8px;padding:10px 12px;color:#c8d6ee;font:11.5px/1.7 Consolas,monospace;max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-all;display:none;margin-top:8px}
+.url{background:#EAF2FB;border:1px solid #C9DDF2;color:var(--primary-deep);border-radius:6px;padding:6px 10px;font-size:12.5px;word-break:break-all;display:none;margin-top:8px;cursor:pointer}
+.foot{margin-top:28px;color:var(--text-sub);font-size:12px;text-align:center}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgba(15,23,37,.92);color:#fff;padding:10px 22px;border-radius:999px;font-size:13.5px;opacity:0;transition:.25s;pointer-events:none;z-index:9}
+</style>
+</head>
+<body>
+<div class="hero">
+  <div class="inner">
+    <h1>洗衣管家工具箱 · 控制中心</h1>
+    <div class="sub" id="shopLine">本地数据服务 · 全程只读 · 口令保护</div>
+    <div class="chips" id="chips"></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="tiles">
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-6h6v6"/></svg></div>
+      <h3>会员数据查询台</h3>
+      <p>概览仪表盘 + 全部会员搜索筛选、订单明细展开、CSV 导出。</p>
+      <div class="acts"><button class="b-pri" id="goViewer">打开</button></div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></div>
+      <h3>订单抓取操作台</h3>
+      <p>开始/暂停全量订单抓取，实时进度与日志，定时同步设置。</p>
+      <div class="acts"><button class="b-pri" id="goConsole">打开</button></div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg></div>
+      <h3>导出会员数据</h3>
+      <p>快速导出（常规+全量字段）几秒完成；完整版含详情增量，几分钟。</p>
+      <div class="acts">
+        <button class="b-pri" id="btnExpQuick">快速导出</button>
+        <button class="b-sec" id="btnExpDeep">完整导出</button>
+        <button class="b-dan" id="btnExpStop" disabled>停止</button>
+      </div>
+      <div class="state" id="expState">空闲</div>
+      <div class="log" id="expLog"></div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 12h16"/><path d="M4 6h16"/><path d="M4 18h16"/><path d="M18 3l3 3-3 3"/></svg></div>
+      <h3>洗衣管家调试模式</h3>
+      <p>抓取前自动确保调试端口；此操作可在软件未开调试端口时重启软件。</p>
+      <div class="acts"><button class="b-sec" id="btnDebug">检测 / 重启进调试模式</button></div>
+      <div class="state" id="dbgState">—</div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.5 3 14 0 18"/><path d="M12 3c-3 3.5-3 14 0 18"/></svg></div>
+      <h3>外网访问隧道</h3>
+      <p>把本机服务临时暴露公网（trycloudflare 临时地址，重启即变）。</p>
+      <div class="acts">
+        <button class="b-pri" id="btnTunStart">开启</button>
+        <button class="b-dan" id="btnTunStop">关闭</button>
+      </div>
+      <div class="state" id="tunState">—</div>
+      <div class="url" id="tunUrl" title="点击复制"></div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M9 6l3-3 3 3"/><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 15h8"/></svg></div>
+      <h3>开机自启（服务）</h3>
+      <p>登录 Windows 30 秒后后台自动启动本地服务，无窗口。</p>
+      <div class="acts">
+        <button class="b-pri" id="btnAsInstall">安装</button>
+        <button class="b-dan" id="btnAsRemove">移除</button>
+      </div>
+      <div class="state" id="asState">—</div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 7h18v12H3z"/><path d="M3 7l2-4h14l2 4"/><path d="M10 11h4"/></svg></div>
+      <h3>数据文件夹</h3>
+      <p>打开导出结果目录（Excel/JSON、比对缓存、订单数据）。</p>
+      <div class="acts"><button class="b-sec" id="btnFolder">打开</button></div>
+    </div>
+
+    <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M9 18V6l10 6z"/><circle cx="12" cy="12" r="9"/></svg></div>
+      <h3>使用说明</h3>
+      <p>各入口职责、常见问题与安全红线速查（网页版说明）。</p>
+      <div class="acts"><button class="b-sec" id="btnHelp">打开</button></div>
+    </div>
+  </div>
+  <div class="foot">全程只读 · 不写洗衣管家软件 · 服务端口 127.0.0.1:8791（仅本机）</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+var TOKEN='';var m=/[?&]token=([^&]+)/.exec(location.search);if(m){TOKEN=decodeURIComponent(m[1]);document.cookie='xconsole='+TOKEN+'; path=/; Max-Age=31536000';}
+function api(path,method,body){
+  var h={'Content-Type':'application/json'};
+  if(TOKEN)h['x-console-token']=TOKEN;
+  return fetch(path,{method:method||'GET',headers:h,body:body?JSON.stringify(body):undefined})
+    .then(function(r){if(r.status===401){location.href='/';throw new Error('auth');}return r.json().then(function(j){return{code:r.status,j:j};});});
+}
+function toast(m){var t=document.getElementById('toast');t.textContent=m;t.style.opacity='.95';clearTimeout(t._tm);t._tm=setTimeout(function(){t.style.opacity='0';},2400);}
+function fmt(n){return (Number(n)||0).toLocaleString('zh-CN');}
+
+var tunTimer=null;
+function refresh(){
+  api('/api/hub/status').then(function(r){
+    if(r.code!==200){return;}
+    var s=r.j;
+    var chips=[];
+    chips.push('<span class="chip'+(s.cdp==='ok'?'':' bad')+'">服务 <b>运行中</b> · 调试端口 '+(s.cdp==='ok'?'<b class="st-ok">正常</b>':'<b class="st-bad">不可用</b>')+'</span>');
+    chips.push('<span class="chip">会员 <b>'+fmt(s.members)+'</b> · 订单 <b>'+fmt(s.orders.orders)+'</b></span>');
+    if(s.stamp)chips.push('<span class="chip">数据 <b>'+s.stamp+'</b></span>');
+    chips.push(s.schedule.enabled
+      ?'<span class="chip">定时 <b>每天 '+s.schedule.time+'</b>'+(s.schedule.shutdownAfter?' · 同步后关机':'')+'</span>'
+      :'<span class="chip">定时 <b>未启用</b></span>');
+    chips.push(s.autostart==='installed'?'<span class="chip ok">开机自启 <b>已安装</b></span>':'<span class="chip">开机自启 <b>未安装</b></span>');
+    chips.push(s.tunnel.running?'<span class="chip ok">隧道 <b>开启</b></span>':'<span class="chip">隧道 <b>关闭</b></span>');
+    document.getElementById('chips').innerHTML=chips.join('');
+    var t=document.getElementById('tunState');
+    if(s.tunnel.running){t.innerHTML='运行中'+(s.tunnel.url?' — 地址见下方':'（地址生成中，几秒后刷新）');}
+    else{t.textContent='未开启';}
+    var u=document.getElementById('tunUrl');
+    if(s.tunnel.running&&s.tunnel.url){u.style.display='block';u.textContent=s.tunnel.url;}
+    else if(!s.tunnel.running){u.style.display='none';}
+    document.getElementById('asState').innerHTML=s.autostart==='installed'?'<b class="st-ok">已安装</b>':'未安装';
+    var es=document.getElementById('expState');
+    if(s.export.running){
+      es.innerHTML='<b class="st-warn">'+(s.export.kind==='deep'?'完整导出':'快速导出')+'进行中</b> · '+(s.export.startedAt?Math.round((Date.now()-new Date(s.export.startedAt).getTime())/1000):0)+' 秒';
+      document.getElementById('btnExpStop').disabled=false;
+      document.getElementById('btnExpQuick').disabled=true;
+      document.getElementById('btnExpDeep').disabled=true;
+      var lg=document.getElementById('expLog');lg.style.display='block';
+      var tail=(s.export.log||[]).slice(-8).join('\n');
+      if(lg.textContent!==tail){lg.textContent=tail||'…';lg.scrollTop=lg.scrollHeight;}
+    } else {
+      if(es.innerHTML.indexOf('进行中')>=0){es.innerHTML='<b class="st-ok">导出已结束</b>';}
+      document.getElementById('btnExpStop').disabled=true;
+      document.getElementById('btnExpQuick').disabled=false;
+      document.getElementById('btnExpDeep').disabled=false;
+    }
+  }).catch(function(){});
+}
+function act(path,body,okMsg){return api(path,'POST',body||{}).then(function(r){toast(r.j&&r.j.error?r.j.error:(okMsg||'已完成'));return r;});}
+document.getElementById('goViewer').addEventListener('click',function(){location.href='/查询页面/index.html';});
+document.getElementById('goConsole').addEventListener('click',function(){location.href='/';});
+document.getElementById('btnExpQuick').addEventListener('click',function(){act('/api/hub/export','POST',{mode:'quick'},'快速导出已启动').then(refresh);});
+document.getElementById('btnExpDeep').addEventListener('click',function(){act('/api/hub/export','POST',{mode:'deep'},'完整导出已启动（几分钟，可离开）').then(refresh);});
+document.getElementById('btnExpStop').addEventListener('click',function(){act('/api/hub/export/stop','POST',null,'已停止').then(refresh);});
+document.getElementById('btnDebug').addEventListener('click',function(){
+  var b=this;b.disabled=true;document.getElementById('dbgState').textContent='检测中（如需重启软件约需 90 秒）…';
+  api('/api/hub/ensure-debug','POST',{}).then(function(r){
+    b.disabled=false;
+    document.getElementById('dbgState').innerHTML=r.j&&r.j.ok?'<b class="st-ok">调试端口正常</b>':'<b class="st-bad">'+esc(r.j&&r.j.error||'失败')+'</b>';
+    refresh();
+  });
+});
+document.getElementById('btnTunStart').addEventListener('click',function(){
+  act('/api/hub/tunnel/start','POST',null,'隧道启动中').then(function(){setTimeout(refresh,3000);setTimeout(refresh,8000);});
+});
+document.getElementById('btnTunStop').addEventListener('click',function(){act('/api/hub/tunnel/stop','POST',null,'隧道已关闭').then(refresh);});
+document.getElementById('tunUrl').addEventListener('click',function(){document.execCommand('copy');toast('已选中，Ctrl+C 复制');window.getSelection().selectAllChildren(this);});
+document.getElementById('btnAsInstall').addEventListener('click',function(){act('/api/hub/autostart','POST',{action:'install'},'开机自启已安装').then(refresh);});
+document.getElementById('btnAsRemove').addEventListener('click',function(){act('/api/hub/autostart','POST',{action:'remove'},'开机自启已移除').then(refresh);});
+document.getElementById('btnFolder').addEventListener('click',function(){api('/api/open','POST',{what:'folder'});toast('已在资源管理器打开');});
+document.getElementById('btnHelp').addEventListener('click',function(){location.href='/使用说明.html';});
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+refresh();
+setInterval(refresh,3000);
+})();
+</script>
+</body>
+</html>

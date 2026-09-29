@@ -32,6 +32,7 @@ const JSONL_PATH = path.join(OUT_DIR, '.orders_results.jsonl');
 const LOG_MAX = 500;
 const SCHEDULE_FILE = path.join(ROOT, '.sync_schedule.json');
 const TOKEN_FILE = path.join(ROOT, '.console_token.txt');
+const HUB_FILE = path.join(ROOT, '控制中心.html');
 const APP_EXE = 'D:\\Blending_Release-6.1.17\\xygjwinapp.exe';
 const SHUTDOWN_DELAY = 120; // 同步完成后延迟关机秒数（期间可取消）
 
@@ -464,6 +465,100 @@ async function statusPayload() {
   };
 }
 
+/* ---------------- 控制中心（入口集成） ---------------- */
+const HUB_LOG = path.join(ROOT, '.dev', 'hub_export.log');
+const CLOUDFLARED = path.join(ROOT, 'app', 'cloudflared.exe');
+const TUNNEL_LOG = path.join(ROOT, '.dev', 'tunnel.err.log');
+let hubChild = null, hubKind = null, hubStartedAt = null, hubLog = [];
+const HUB_LOG_MAX = 200;
+function hubPush(line) { hubLog.push(line); if (hubLog.length > HUB_LOG_MAX) hubLog.splice(0, hubLog.length - HUB_LOG_MAX); }
+function latestExportInfo() {
+  try {
+    const dir = path.join(ROOT, '导出结果');
+    const files = fs.readdirSync(dir).filter((f) => f.startsWith('会员导出_') && f.endsWith('.json')).sort();
+    if (!files.length) return null;
+    const st = fs.statSync(path.join(dir, files[files.length - 1]));
+    return { file: files[files.length - 1], at: st.mtime.toISOString(), stamp: files[files.length - 1].replace('会员导出_', '').replace('.json', '') };
+  } catch (e) { return null; }
+}
+function tunnelInfo() {
+  let running = false;
+  try { execFileSyncCompat('tasklist', ['/FI', 'IMAGENAME eq cloudflared.exe', '/FO', 'CSV', '/NH'], (out) => { running = /cloudflared/i.test(out); }); } catch (e) {}
+  let url = '';
+  try {
+    const raw = fs.readFileSync(TUNNEL_LOG, 'utf8');
+    const m = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/.exec(raw);
+    if (m) url = m[0];
+  } catch (e) {}
+  return { running, url };
+}
+/* 5.1/跨环境安全的 tasklist 捕获 */
+function execFileSyncCompat(cmd, args, onOut) {
+  try {
+    const ch = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], env: HELPER_ENV });
+    let out = '';
+    ch.stdout.on('data', (d) => { out += d.toString(); });
+    ch.on('exit', () => { if (onOut) onOut(out); });
+    ch.on('error', () => { if (onOut) onOut(''); });
+  } catch (e) { if (onOut) onOut(''); }
+}
+function wireHubChild(ch) {
+  let buf = '';
+  const feed = (d) => {
+    buf += d.toString();
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).replace(/\r$/, '');
+      buf = buf.slice(i + 1);
+      if (line.trim()) hubPush(line);
+    }
+  };
+  ch.stdout.on('data', feed);
+  ch.stderr.on('data', feed);
+}
+let hubDataCache = null, hubDataM = 0;
+function hubData() {
+  try {
+    const f = path.join(ROOT, '查询页面', 'data.js');
+    const mt = fs.statSync(f).mtimeMs;
+    if (hubDataCache && hubDataM === mt) return hubDataCache;
+    const j = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^window\.MEMBER_DATA=/, '').replace(/;\s*$/, ''));
+    hubDataCache = { count: (j.members || []).length, stamp: j.exportStamp || '', shop: j.shop || '' };
+    hubDataM = mt;
+    return hubDataCache;
+  } catch (e) { return hubDataCache || { count: 0, stamp: '', shop: '' }; }
+}
+async function hubStatus() {
+  const tun = tunnelInfo();
+  const exp = latestExportInfo();
+  const js = readJsonlStats();
+  const ms = hubData();
+  let autostart = 'unknown';
+  try {
+    const out = await new Promise((resolve) => {
+      const ch = spawn('schtasks', ['/query', '/tn', 'XQY-Orders-Console'], { stdio: ['ignore', 'pipe', 'ignore'], env: HELPER_ENV });
+      let out = '';
+      ch.stdout.on('data', (d) => { out += d.toString(); });
+      ch.on('exit', () => resolve(out));
+      ch.on('error', () => resolve(''));
+    });
+    autostart = /XQY-Orders-Console/i.test(out) ? 'installed' : 'missing';
+  } catch (e) {}
+  return {
+    service: 'ok',
+    cdp: await cdpCheck(),
+    schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter },
+    members: ms.count,
+    stamp: ms.stamp,
+    orders: js,
+    lastExport: exp,
+    export: { running: !!hubChild, kind: hubKind, startedAt: hubStartedAt, log: hubLog.slice(-12) },
+    tunnel: tun,
+    autostart
+  };
+}
+
+
 /* ---------------- HTTP ---------------- */
 function sendJson(res, obj, code = 200) {
   const body = JSON.stringify(obj);
@@ -503,6 +598,11 @@ const server = http.createServer(async (req, res) => {
       try { html = fs.readFileSync(PAGE_FILE, 'utf8'); } catch (e) { html = '<!DOCTYPE html><meta charset="utf-8"><body style="font-family:sans-serif">未找到 操作页面.html</body>'; }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
+      return;
+    }
+    /* ---- 控制中心 ---- */
+    if (req.method === 'GET' && (p === '/home' || p === '/home/')) {
+      try { const html = fs.readFileSync(HUB_FILE, 'utf8'); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(html); } catch (e) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('控制中心文件缺失'); }
       return;
     }
     /* ---- 静态页面：查询页面 目录（data.js 与查询台页面）---- */
@@ -549,6 +649,81 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, { ok: true });
       return;
     }
+    /* ---- 控制中心 API ---- */
+    if (p === '/api/hub/status' && req.method === 'GET') { sendJson(res, await hubStatus()); return; }
+    if (p === '/api/hub/export' && req.method === 'POST') {
+      if (child) { sendJson(res, { error: '抓取任务运行中，请稍后再导出' }, 409); return; }
+      if (hubChild) { sendJson(res, { error: '已有导出在进行' }, 409); return; }
+      const b = await readBody(req);
+      const deep = b.mode === 'deep';
+      hubKind = deep ? 'deep' : 'quick';
+      hubStartedAt = new Date().toISOString();
+      hubLog = [];
+      hubPush('启动' + (deep ? '完整导出（含详情增量）' : '快速导出（常规+全量字段）'));
+      try { fs.writeFileSync(HUB_LOG, ''); } catch (e) {}
+      hubChild = spawn(process.execPath, deep ? ['app/export.mjs', '--deep'] : ['app/export.mjs'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+      wireHubChild(hubChild);
+      hubChild.on('exit', (code) => {
+        hubPush(code === 0 ? '导出完成。' : '导出进程退出（代码 ' + code + '）');
+        hubChild = null; hubKind = null;
+      });
+      sendJson(res, { ok: true });
+      return;
+    }
+    if (p === '/api/hub/export/stop' && req.method === 'POST') {
+      if (!hubChild) { sendJson(res, { error: '没有进行中的导出' }, 409); return; }
+      try { hubChild.kill(); } catch (e) {}
+      hubPush('已手动停止导出。');
+      sendJson(res, { ok: true });
+      return;
+    }
+    if (p === '/api/hub/ensure-debug' && req.method === 'POST') {
+      const ok = await ensureDebugApp();
+      sendJson(res, { ok, error: ok ? undefined : '未能进入调试模式，请查看操作台日志' }, ok ? 200 : 500);
+      return;
+    }
+    if (p === '/api/hub/tunnel/start' && req.method === 'POST') {
+      if (!fs.existsSync(CLOUDFLARED)) { sendJson(res, { error: '未找到 cloudflared.exe（app 目录）' }, 404); return; }
+      const tun = tunnelInfo();
+      if (tun.running) { sendJson(res, { ok: true, url: tun.url, already: true }); return; }
+      try { fs.writeFileSync(TUNNEL_LOG, ''); } catch (e) {}
+      spawn(CLOUDFLARED, ['tunnel', '--url', 'http://127.0.0.1:8791', '--no-autoupdate'], { stdio: 'ignore', detached: true }).on('error', () => {});
+      sendJson(res, { ok: true });
+      return;
+    }
+    if (p === '/api/hub/tunnel/stop' && req.method === 'POST') {
+      try { spawn('taskkill', ['/F', '/IM', 'cloudflared.exe'], { stdio: 'ignore', env: HELPER_ENV }); } catch (e) {}
+      sendJson(res, { ok: true });
+      return;
+    }
+    if (p === '/api/hub/tunnel/status' && req.method === 'GET') {
+      const tun = tunnelInfo();
+      if (tun.running && !tun.url) {
+        // 等待 URL 出现（最多再读一次延时由前端轮询处理）
+      }
+      sendJson(res, tun);
+      return;
+    }
+    if (p === '/api/hub/autostart' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (b.action === 'install') {
+        const vbs = path.join(ROOT, '开机自启-操作台服务.vbs');
+        if (!fs.existsSync(vbs)) { sendJson(res, { error: '缺少 开机自启-操作台服务.vbs' }, 404); return; }
+        try {
+          const ch = spawn('schtasks', ['/Create', '/F', '/TN', 'XQY-Orders-Console', '/TR', 'wscript.exe "' + vbs + '"', '/SC', 'ONLOGON', '/DELAY', '0000:30', '/RL', 'LIMITED'], { stdio: 'ignore', env: HELPER_ENV });
+          ch.on('exit', (code) => sendJson(res, { ok: code === 0 }, code === 0 ? 200 : 500));
+        } catch (e) { sendJson(res, { error: e.message }, 500); }
+        return;
+      }
+      if (b.action === 'remove') {
+        const ch = spawn('schtasks', ['/Delete', '/F', '/TN', 'XQY-Orders-Console'], { stdio: 'ignore', env: HELPER_ENV });
+        ch.on('exit', (code) => sendJson(res, { ok: code === 0 }, code === 0 ? 200 : 500));
+        return;
+      }
+      sendJson(res, { error: '未知操作' }, 400);
+      return;
+    }
+
     sendJson(res, { error: 'not found' }, 404);
   } catch (e) {
     sendJson(res, { error: (e && e.message) || String(e) }, 500);
