@@ -426,7 +426,7 @@ window.__renderOverview = function (members, D) {
     }
     function orderSummaryCardHtml(o){
       var st = o.wstatus != null ? ('状态码 ' + o.wstatus) : '—';
-      return '<div class="o-card" style="background:#FFFDF6"><div class="o-hd" style="cursor:default"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span><span class="o-amt2">¥'+fmtYuan(o.trmb)+'</span><span class="o-dt2">'+esc(o.ctime||'')+'</span></div><div class="o-bd" style="display:block;border-top:1px dashed var(--line)"><div class="o-pay">该订单的完整详情（衣物/照片/支付）尚未抓取——重跑「导出会员数据(含详情).cmd」后自动补齐。</div></div></div>';
+      return '<div class="o-card" style="background:#FFFDF6"><div class="o-hd" style="cursor:default"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span><span class="o-amt2">¥'+fmtYuan(o.trmb)+'</span><span class="o-dt2">'+esc(o.ctime||'')+(o.poscode?(' · 架：'+esc(o.poscode)):'')+'</span></div><div class="o-bd" style="display:block;border-top:1px dashed var(--line)"><div class="o-pay">该订单的完整详情（衣物/照片/支付）尚未抓取——重跑「导出会员数据(含详情).cmd」后自动补齐。</div></div></div>';
     }
     function orderCardHtml(o){
       var d = (o.detail && o.detail.data) || {};
@@ -435,7 +435,7 @@ window.__renderOverview = function (members, D) {
       var plist = (o.detail && o.detail.plist) || {};
       var photoN = 0; for (var k in imgarr){ photoN += (imgarr[k]||[]).length; }
       var st = d.wstatus_name || (d.wstatus!=null ? ('状态码 '+d.wstatus) : '—');
-      var hd = '<div class="o-hd"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span><span class="o-amt2">¥'+fmtYuan(d.trmb)+'</span><span class="o-tog">[展开]</span><div class="o-dt2">'+esc(d.ctime||'')+(garments.length?(' · '+garments.length+' 件衣物'):'')+(photoN?(' · '+photoN+' 张照片'):'')+'</div></div>';
+      var hd = '<div class="o-hd"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span><span class="o-amt2">¥'+fmtYuan(d.trmb)+'</span><span class="o-tog">[展开]</span><div class="o-dt2">'+esc(d.ctime||'')+(garments.length?(' · '+garments.length+' 件衣物'):'')+(photoN?(' · '+photoN+' 张照片'):'')+(o.poscode?(' · 架：'+esc(o.poscode)):'')+'</div></div>';
       var bd = [];
       if(garments.length){
         bd.push('<table class="o-gt"><thead><tr><th>衣物</th><th>条码</th><th style="text-align:right">洗涤价</th><th style="text-align:right">实收</th></tr></thead><tbody>');

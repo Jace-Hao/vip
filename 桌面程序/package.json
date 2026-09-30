@@ -4,13 +4,34 @@
   "version": "1.0.0",
   "main": "main.js",
   "author": "xqy",
-  "scripts": { "start": "electron .", "dist": "electron-builder --win portable" },
-  "devDependencies": { "electron": "^33.0.0", "electron-builder": "^25.1.8" },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
   "build": {
     "appId": "com.xqy.toolbox",
     "productName": "洗衣管家工具箱",
-    "files": ["main.js", "package.json", "icon.ico"],
-    "win": { "target": ["portable"], "icon": "icon.ico", "signAndEditExecutable": false },
-    "portable": { "artifactName": "洗衣管家工具箱.exe" }
+    "files": [
+      "main.js",
+      "package.json",
+      "icon.ico"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "icon.ico",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "洗衣管家工具箱.exe"
+    }
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }

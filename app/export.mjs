@@ -103,6 +103,19 @@ function memberSig(m) {
   return createHash('md5').update(JSON.stringify(o)).digest('hex');
 }
 
+/* 订单列表签名：getuinfo 订单行（状态/金额/时间）任一变化都会改变签名 */
+function orderListSig(detail) {
+  try {
+    const rows = (detail && detail.order && detail.order.list) || [];
+    const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, r.cnum]);
+    return createHash('md5').update(JSON.stringify(mini)).digest('hex');
+  } catch (e) { return ''; }
+}
+/* 详情双签名：会员字段 + 订单列表内容 */
+function detailSig(m, detail) {
+  return createHash('md5').update(memberSig(m) + '|' + orderListSig(detail)).digest('hex');
+}
+
 function stamp() {
   const d = new Date();
   const p = (x) => String(x).padStart(2, '0');
@@ -524,25 +537,20 @@ async function main() {
       }
     }
 
-    // 变更比对：只抓取「无缓存」或「签名有变化」的会员
+    // 变更比对 v2：逐一获取全部会员最新详情（getuinfo 含订单列表），
+    // 按「会员字段 + 订单列表内容」双签名与缓存比对，仅变化部分写入（会员字段与订单内容变化都能识别）。
     let needFetch = [];
     if (DEEP_FULL) {
       log('      已指定全量刷新模式（--deep-full）：将重新获取全部会员详情');
       needFetch = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
     } else {
-      let skipCount = 0, newCount = 0, changedCount = 0;
-      for (const m of deepTargets) {
-        const uid = String(m.uid);
-        if (doneUids.has(uid)) continue; // 本次已抓取
-        const e = cache.entries[uid];
-        if (!e || !e.detail) { needFetch.push(m); newCount++; }
-        else if (!e.sig || e.sig !== memberSig(m)) { needFetch.push(m); changedCount++; }
-        else skipCount++;
-      }
-      log(`      数据比对：无需更新 ${skipCount} 人；需重新获取 ${needFetch.length} 人（新会员 ${newCount}、有变更 ${changedCount}）`);
+      log(`      数据比对 v2：将逐一获取 ${deepTargets.length} 位会员最新详情并与缓存比对（仅变化部分写入）…`);
+      needFetch = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
     }
 
     const remaining = needFetch;
+    const mByUid = new Map(deepTargets.map((m) => [String(m.uid), m]));
+    let batchSkippedSame = 0;
     log('');
     log(`[5/5] 正在抓取会员详情（本次需获取 ${remaining.length} 个 / 共 ${deepTargets.length} 个）...`);
 
@@ -571,17 +579,26 @@ async function main() {
         const results = await fetchDetailBatch(batch.map((m) => m.uid));
         const appends = [];
         const failed = [];
+        let skippedSame = 0;
         for (const item of results) {
           if (item && item.detail) {
-            appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
-            done++;
+            const mObj = mByUid.get(String(item.uid));
+            const newSig = mObj ? detailSig(mObj, item.detail) : null;
+            const e = cache.entries[String(item.uid)];
+            const unchanged = !DEEP_FULL && newSig && e && e.detail && e.sig === newSig;
+            if (unchanged) {
+              skippedSame++;
+            } else {
+              appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
+              done++;
+            }
           } else {
             failed.push(item && item.uid != null ? item.uid : null);
           }
         }
+        if (appends.length || skippedSame) lastOkAt = Date.now();
         if (appends.length) {
           fs.appendFileSync(jsonlPath, appends.join('\n') + '\n', 'utf8');
-          lastOkAt = Date.now();
         }
         if (failed.length === 0) { pace = Math.max(1200, pace - 100); break; }
         if (attempt >= 4) {
@@ -603,7 +620,8 @@ async function main() {
         } catch (e) { /* ignore */ }
       }
       if (stopAll) break;
-      log(`      详情进度 ${done} / ${remaining.length}${errors.length ? `（跳过 ${errors.length}）` : ''}`);
+      log(`      详情进度 ${done} / ${remaining.length}${batchSkippedSame ? `（内容一致跳过 ${batchSkippedSame}）` : ''}${errors.length ? `（失败 ${errors.length}）` : ''}`);
+      batchSkippedSame = 0;
       if (Date.now() - lastOkAt > 30 * 60 * 1000) {
         log('');
         log('      [提示] 已连续 30 分钟没有成功取回数据，自动停止（数据已保存，稍后可重跑续传）。');
@@ -633,7 +651,7 @@ async function main() {
     for (const m of deepTargets) {
       const uid = String(m.uid);
       const det = fetchedMap.get(uid);
-      if (det) cache.entries[uid] = { sig: memberSig(m), detail: det };
+      if (det) cache.entries[uid] = { sig: detailSig(m, det), detail: det };
     }
     cache.savedAt = new Date().toISOString();
     try { fs.writeFileSync(cachePath, JSON.stringify(cache), 'utf8'); } catch (e) { log('      [提示] 比对缓存写入失败：' + (e && e.message)); }

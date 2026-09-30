@@ -71,6 +71,12 @@ async function waitLong(seconds, reason) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* 订单列表签名：订单内容（状态/金额/时间/架号）任一变化都会改变签名 */
+function listSig(rows) {
+  const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, r.poscode, r.gtime, r.pctime]);
+  return createHash('md5').update(JSON.stringify(mini)).digest('hex');
+}
+
 function stamp() { const d = new Date(), p = (x) => String(x).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
 function fmtYuan(cents) { const n = Number(cents); return isFinite(n) ? (n / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -162,6 +168,23 @@ function loadMembersFromExport() {
   return list;
 }
 
+/* 分页拉取订单列表（只读列表，不含衣物/照片详情） */
+async function fetchOrderList(cdp, m) {
+  const uid = Number(m.uid);
+  const size = 100;
+  let start = 0, orders = [], total = null;
+  for (;;) {
+    const r = await callApi(cdp, { act: 'searchwashorders', uid, start, size, currentPage: Math.floor(start / size) + 1, currenQuantity: size });
+    if (total === null) total = Number(r.total) || 0;
+    const rows = r.data || [];
+    orders = orders.concat(rows);
+    if (orders.length >= total || rows.length < size) break;
+    start += size;
+    await sleep(350);
+  }
+  return orders;
+}
+
 async function fetchMemberOrders(cdp, m) {
   const uid = Number(m.uid);
   const size = 100;
@@ -219,6 +242,7 @@ async function runBatch(cdp, sample) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const doneUids = new Set();
   const sigMap = new Map();
+  const lastRowMap = new Map();
   const incompleteUids = new Set();
   if (fs.existsSync(jsonlPath)) {
     const age = Date.now() - fs.statSync(jsonlPath).mtimeMs;
@@ -231,24 +255,38 @@ async function runBatch(cdp, sample) {
       }
       for (const [u, o] of lastByUid) {
         doneUids.add(u);
+        lastRowMap.set(u, o);
         if (o.sig) sigMap.set(u, o.sig);
         if (o.complete === false) incompleteUids.add(u);
       }
     }
   }
-  /* 增量比对：无记录、签名有变化、或上次有失败未补齐的会员才重新抓取（会员数据任一字段变化都会改变签名） */
+  /* 增量比对 v2：会员字段签名 + 订单列表内容签名 双重判断。
+     订单数量不变但内容变化（状态推进/金额调整/架号变更等）也能被识别。 */
   const todo = [];
   let skipN = 0, newN = 0, chgN = 0, redoN = 0;
   for (const m of picked) {
     const u = String(m.uid);
     if (doneUids.has(u) && incompleteUids.has(u)) { redoN++; todo.push(m); continue; }
-    if (doneUids.has(u) && sigMap.get(u) === memberSig(m)) { skipN++; continue; }
-    if (doneUids.has(u)) chgN++; else newN++;
-    todo.push(m);
+    if (!doneUids.has(u)) { newN++; todo.push(m); continue; }
+    if (sigMap.get(u) !== memberSig(m)) { chgN++; todo.push(m); continue; }
+    /* 会员字段没变：再比对订单列表内容签名 */
+    try {
+      const rows = await fetchOrderList(cdp, m);
+      const lsig = listSig(rows);
+      m.__lsig = lsig;
+      const last = lastRowMap.get(u);
+      if (last && last.listSig === lsig) { skipN++; continue; }
+      chgN++; todo.push(m);
+    } catch (e) {
+      console.log(`      [提示] ${m.name || u} 订单列表取数失败（${e.message}），保守重抓`);
+      await sleep(800);
+      chgN++; todo.push(m);
+    }
   }
   const mode = picked.length >= members.length ? '全量' : '抽样';
-  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对：无需更新 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、有变化 ${chgN}、补抓失败 ${redoN}）`);
-  console.log('');
+  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对 v2：内容一致跳过 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、内容有变化 ${chgN}、补抓失败 ${redoN}）`);
+  console.log('');  console.log('');
 
   const t0 = Date.now();
   let okCount = 0, failCount = 0, orderTotal = 0, consecutiveFail = 0, doneSinceRest = 0;
@@ -274,7 +312,9 @@ async function runBatch(cdp, sample) {
     }
     consecutiveFail = 0; okCount++; orderTotal += result.orders.length;
     const mSec = Math.round((Date.now() - mStart) / 1000);
-    fs.appendFileSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n', 'utf8');
+    result.orders.forEach((o) => { if (o.summary && o.summary.poscode != null) o.poscode = o.summary.poscode; });
+    const lsig = (typeof m.__lsig === 'string') ? m.__lsig : '';
+    fs.appendFileSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), listSig: lsig, fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n', 'utf8');
     console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
     await sleep(400);
     doneSinceRest++;
