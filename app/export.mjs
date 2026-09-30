@@ -551,6 +551,7 @@ async function main() {
     const remaining = needFetch;
     const mByUid = new Map(deepTargets.map((m) => [String(m.uid), m]));
     let batchSkippedSame = 0;
+    let fetchedSinceRest = 0;
     log('');
     log(`[5/5] 正在抓取会员详情（本次需获取 ${remaining.length} 个 / 共 ${deepTargets.length} 个）...`);
 
@@ -591,6 +592,12 @@ async function main() {
             } else {
               appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
               done++;
+              /* 抓取间歇：每实际抓取 5 个会员休息 2 分钟，降低被限速风险 */
+              fetchedSinceRest++;
+              if (fetchedSinceRest >= 5) {
+                fetchedSinceRest = 0;
+                await waitLong(120, '已连续抓取 5 个会员，休息 2 分钟');
+              }
             }
           } else {
             failed.push(item && item.uid != null ? item.uid : null);
