@@ -171,16 +171,29 @@
   .kpi:hover{background:var(--bg-dark-card2)}
   .hero .hero-head h2{padding-left:11px;position:relative}
   .hero .hero-head h2::before{content:'';position:absolute;left:0;top:5px;bottom:5px;width:4px;border-radius:2px;background:var(--primary-dark)}
+
+  /* ===== 多级结构（概览→列表→详情）===== */
+  .lvl{display:none}
+  .lvl.on{display:block}
+  #vList .layout{grid-template-columns:1fr}
+  .crumbs{font-size:13px;color:var(--muted);margin:12px 0 4px}
+  .crumbs a{color:var(--brand-ink);text-decoration:none}
+  .crumbs a:hover{text-decoration:underline}
+  .crumbs b{color:var(--text-strong)}
+  .detail.wide{position:static;max-height:none;width:100%;border-radius:12px;box-shadow:var(--shadow)}
+  .cta-row{margin-top:16px;display:flex;align-items:center;gap:12px}
+  .cta-note{color:var(--tint);font-size:12.5px}
+  .topbar h1 a{color:inherit;text-decoration:none}
 </style>
 </head>
 <body>
   <div class="topbar">
-    <h1>会员数据查询台</h1>
+    <h1><a href="#/" style="color:inherit;text-decoration:none">会员数据查询台</a></h1>
     <div class="meta" id="metaChips"></div>
     <div class="spacer"></div>
     <button class="btn" id="btnCsv">导出筛选结果 CSV</button> <button class="btn" id="btnHome" title="工具箱总入口">控制中心</button>
   </div>
-<section class="hero" id="heroOverview">
+<section class="hero lvl on" id="vHome">
     <div class="hero-head"><h2>会员数据概览</h2><span class="sub" id="ovSub">—</span></div>
     <div class="kpis" id="ovKpis"></div>
     <div class="charts">
@@ -189,7 +202,9 @@
       <div class="chart-card"><h3>近 12 个月注册趋势</h3><div id="ovLine"></div></div>
       <div class="chart-card"><h3>累计消费 Top 10</h3><div id="ovTop"></div></div>
     </div>
+    <div class="cta-row"><button class="btn" id="ctaMembers">浏览全部会员</button><span class="cta-note" id="ctaCount"></span></div>
   </section>
+  <section class="lvl" id="vList">
   <div class="toolbar">
     <div class="search">
       <input id="q" type="search" placeholder="搜索：姓名 / 电话 / 拼音 / 卡号 / 订单号 / 标签 / 备注…" autocomplete="off">
@@ -224,7 +239,12 @@
       </div>
       <div class="pager" id="pager"></div>
     </div>
-    <aside class="detail" id="detailBox">
+
+  </div>
+  </section>
+  <section class="lvl" id="vDetail">
+    <div class="crumbs"><a href="#/members">会员列表</a><span> / </span><b id="crumbName">会员详情</b></div>
+    <aside class="detail wide" id="detailBox">
       <button class="close" id="detailClose">✕</button>
       <div class="hd">
         <div class="name">选择一个会员</div>
@@ -232,7 +252,8 @@
       </div>
       <div class="sec"><div class="muted">这里会显示该会员的：基本资料、账户与余额、消费统计、订单明细、卡券信息，以及全部原始字段。</div></div>
     </aside>
-  </div>
+    <div style="margin-top:10px"><button class="btn" id="btnBackList">← 返回会员列表</button></div>
+  </section>
   <div class="toast" id="toast"></div>
 
   <script>
@@ -530,8 +551,8 @@ window.__renderOverview = function (members, D) {
       renderPager(pages);
       var tb=document.getElementById('tbody');
       tb.querySelectorAll('tr.row').forEach(function(tr){
-        tr.addEventListener('click',function(){ select(tr.getAttribute('data-uid')); });
-        tr.addEventListener('keydown',function(e){ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); select(tr.getAttribute('data-uid')); } });
+        tr.addEventListener('click',function(){ var u=tr.getAttribute('data-uid'); select(u); location.hash='#/member/'+encodeURIComponent(u); });
+        tr.addEventListener('keydown',function(e){ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); var u=tr.getAttribute('data-uid'); select(u); location.hash='#/member/'+encodeURIComponent(u); } });
       });
     }
     function renderPager(pages){
@@ -706,7 +727,7 @@ window.__renderOverview = function (members, D) {
       var box=document.getElementById('detailBox');
       box.innerHTML='<button class="close" id="detailClose">✕</button>'+H.join('');
       box.classList.add('open');
-      document.getElementById('detailClose').addEventListener('click',function(){ box.classList.remove('open'); });
+      document.getElementById('detailClose').addEventListener('click',function(){ box.classList.remove('open'); location.hash='#/members'; });
       var cp=document.getElementById('copyPhone'); if(cp) cp.addEventListener('click',function(){ copyText(m._phone); });
       var ci=document.getElementById('copyInfo'); if(ci) ci.addEventListener('click',function(){ copyText((m._name||'')+' '+m._phone); });
     }
@@ -761,6 +782,32 @@ window.__renderOverview = function (members, D) {
       toast('已导出 '+arr.length+' 条到 CSV');
     }
 
+    /* ---------- 多级导航：概览(#/) → 会员列表(#/members) → 会员详情(#/member/uid) ---------- */
+    function showLvl(name){
+      document.querySelectorAll('.lvl').forEach(function(x){ x.classList.toggle('on', x.id === 'v' + name); });
+    }
+    function applyRoute(){
+      var h = location.hash || '#/';
+      var mm = /^#\/member\/(.+)$/.exec(h);
+      if (mm) {
+        showLvl('Detail');
+        var uid = decodeURIComponent(mm[1]);
+        select(uid);
+        var m = members.find(function(x){ return x._uid === uid; });
+        var cn = document.getElementById('crumbName');
+        if (cn) cn.textContent = (m && (m._name || m._uid)) || uid;
+        window.scrollTo(0, 0);
+        return;
+      }
+      if (h.indexOf('#/members') === 0) { showLvl('List'); render(); window.scrollTo(0, 0); return; }
+      showLvl('Home');
+      var cc = document.getElementById('ctaCount');
+      if (cc) cc.textContent = '共 ' + members.length + ' 位会员 · 数据 ' + ((D && D.exportStamp) || '');
+      window.scrollTo(0, 0);
+    }
+    window.addEventListener('hashchange', applyRoute);
+    document.getElementById('ctaMembers').addEventListener('click', function(){ location.hash = '#/members'; });
+    document.getElementById('btnBackList').addEventListener('click', function(){ location.hash = '#/members'; });
     bind();
     render();
   })();
