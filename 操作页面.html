@@ -233,7 +233,7 @@
     var b = this; b.disabled = true; b.textContent = '生成中…';
     api('/api/rebuild', 'POST').then(function(){ toast('查询页数据已刷新'); b.disabled = false; b.textContent = '刷新查询页数据'; poll(); });
   });
-  $('#btnViewer').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'viewer' }); });
+  $('#btnViewer').addEventListener('click', function(){ location.href = '/查询页面/index.html'; });
   $('#btnCleanup').addEventListener('click', function(){
     var b = this; b.disabled = true; b.textContent = '清理中…';
     api('/api/cleanup', 'POST').then(function(r){
@@ -243,6 +243,7 @@
       poll();
     }).catch(function(){ b.disabled = false; b.textContent = '清理过时数据'; toast('清理失败'); });
   });
+  $('#btnHome').addEventListener('click', function(){ location.href = '/home/'; });
   $('#btnFolder').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'folder' }); });
 
   // 定时同步设置

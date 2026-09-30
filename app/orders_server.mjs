@@ -606,6 +606,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     /* ---- 静态页面：查询页面 目录（data.js 与查询台页面）---- */
+    if (req.method === 'GET' && ['/使用说明.html', '/导出流程图.png'].includes(p)) {
+      const abs = path.join(ROOT, p.slice(1));
+      if (fs.existsSync(abs)) {
+        const mime = p.endsWith('.png') ? 'image/png' : 'text/html; charset=utf-8';
+        res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-store' });
+        res.end(fs.readFileSync(abs));
+      } else { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('not found'); }
+      return;
+    }
     if (req.method === 'GET' && p.startsWith('/查询页面/')) {
       const rel = decodeURIComponent(p.slice(1));
       const abs = path.normalize(path.join(ROOT, rel));
