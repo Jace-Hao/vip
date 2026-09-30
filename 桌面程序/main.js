@@ -55,7 +55,16 @@ if (!gotLock) { app.quit(); } else {
       webPreferences: { contextIsolation: true, nodeIntegration: false }
     });
     win.loadURL(BASE + '/home/?token=' + encodeURIComponent(token));
-    win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+    const BASE_HOST = 'http://127.0.0.1:' + PORT;
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (url.startsWith(BASE_HOST)) {
+        const w = new BrowserWindow({ width: 1100, height: 820, autoHideMenuBar: true, backgroundColor: '#F7F8FA', title: '洗衣管家工具箱' });
+        w.loadURL(url);
+        return { action: 'deny' };
+      }
+      shell.openExternal(url);
+      return { action: 'deny' };
+    });
     win.on('closed', () => { win = null; });
     if (smoke) {
       setTimeout(() => {

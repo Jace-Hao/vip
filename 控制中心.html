@@ -136,7 +136,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       <div class="ic"><svg viewBox="0 0 24 24"><path d="M9 18V6l10 6z"/><circle cx="12" cy="12" r="9"/></svg></div>
       <h3>使用说明</h3>
       <p>各入口职责、常见问题与安全红线速查（网页版说明）。</p>
-      <div class="acts"><button class="b-sec" id="btnHelp">打开</button></div>
+      <div class="acts"><a class="b-sec" href="/使用说明.html" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;padding:7px 14px;border:1px solid var(--stroke);border-radius:6px;background:#fff;color:var(--primary-deep);font-size:13px;font-weight:600;text-decoration:none">打开</a></div>
     </div>
   </div>
   <div class="foot">全程只读 · 不写洗衣管家软件 · 服务端口 127.0.0.1:8791（仅本机）</div>
@@ -217,7 +217,6 @@ document.getElementById('tunUrl').addEventListener('click',function(){document.e
 document.getElementById('btnAsInstall').addEventListener('click',function(){act('/api/hub/autostart','POST',{action:'install'},'开机自启已安装').then(refresh);});
 document.getElementById('btnAsRemove').addEventListener('click',function(){act('/api/hub/autostart','POST',{action:'remove'},'开机自启已移除').then(refresh);});
 document.getElementById('btnFolder').addEventListener('click',function(){api('/api/open','POST',{what:'folder'});toast('已在资源管理器打开');});
-document.getElementById('btnHelp').addEventListener('click',function(){location.href='/使用说明.html';});
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 refresh();
 setInterval(refresh,3000);
