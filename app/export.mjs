@@ -580,6 +580,7 @@ async function main() {
         const results = await fetchDetailBatch(batch.map((m) => m.uid));
         const appends = [];
         const failed = [];
+        let appended = 0;
         let skippedSame = 0;
         for (const item of results) {
           if (item && item.detail) {
@@ -589,9 +590,11 @@ async function main() {
             const unchanged = !DEEP_FULL && newSig && e && e.detail && e.sig === newSig;
             if (unchanged) {
               skippedSame++;
+              done++; /* 比对一致也计入进度（否则全员无变化时进度恒 0，看起来像卡死） */
             } else {
               appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
               done++;
+              appended++;
               /* 抓取间歇：每实际抓取 5 个会员休息 2 分钟，降低被限速风险 */
               fetchedSinceRest++;
               if (fetchedSinceRest >= 5) {
@@ -679,7 +682,9 @@ async function main() {
 
     if (details.length && errors.length === 0) {
       try { if (fs.existsSync(jsonlPath)) fs.unlinkSync(jsonlPath); } catch (e) { /* ignore */ }
-      log(remaining.length ? '      详情抓取完成（临时文件已清理）' : '      没有需要更新的会员（增量比对完成）');
+      log(remaining.length
+        ? (appended > 0 ? '      详情抓取完成：更新 ' + appended + ' 人（临时文件已清理）' : '      比对完成：全部会员数据无变化，无需更新')
+        : '      没有需要更新的会员（增量比对完成）');
     } else if (errors.length) {
       log(`      详情抓取结束：成功 ${details.length}，失败 ${errors.length}（失败项可整体重跑本命令补抓）`);
     }
