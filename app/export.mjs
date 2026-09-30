@@ -551,6 +551,7 @@ async function main() {
     const remaining = needFetch;
     const mByUid = new Map(deepTargets.map((m) => [String(m.uid), m]));
     let batchSkippedSame = 0;
+    let appended = 0; /* 本轮实际更新人数（跨批次累计） */
     let fetchedSinceRest = 0;
     log('');
     log(`[5/5] 正在抓取会员详情（本次需获取 ${remaining.length} 个 / 共 ${deepTargets.length} 个）...`);
@@ -580,7 +581,6 @@ async function main() {
         const results = await fetchDetailBatch(batch.map((m) => m.uid));
         const appends = [];
         const failed = [];
-        let appended = 0;
         let skippedSame = 0;
         for (const item of results) {
           if (item && item.detail) {
