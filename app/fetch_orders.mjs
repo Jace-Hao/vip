@@ -72,8 +72,8 @@ async function waitLong(seconds, reason) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /* 订单列表签名：订单内容（状态/金额/时间/架号）任一变化都会改变签名 */
-function listSig(rows) {
-  const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, r.poscode, r.gtime, r.pctime]);
+function listSig(rows, rackMap) {
+  const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, (rackMap && rackMap.get(String(r.orderid))) || r.poscode || '', r.gtime, r.pctime]);
   return createHash('md5').update(JSON.stringify(mini)).digest('hex');
 }
 
@@ -185,7 +185,7 @@ async function fetchOrderList(cdp, m) {
   return orders;
 }
 
-async function fetchMemberOrders(cdp, m) {
+async function fetchMemberOrders(cdp, m, rackMap) {
   const uid = Number(m.uid);
   const size = 100;
   let start = 0, orders = [], total = null;
@@ -227,9 +227,9 @@ async function fetchMemberOrders(cdp, m) {
       if (!ok) still.push(row);
     }
     if (still.length) console.log(`  ${m.name || uid}：仍有 ${still.length} 笔订单失败（已跳过，后续运行会自动补抓）`);
-    return { orders: details, failedOrders: still.length, complete: still.length === 0 };
+    return { orders: details, failedOrders: still.length, complete: still.length === 0, listSig: listSig(orders, rackMap) };
   }
-  return { orders: details, failedOrders: 0, complete: true };
+  return { orders: details, failedOrders: 0, complete: true, listSig: listSig(orders, rackMap) };
 }
 
 async function runBatch(cdp, sample) {
@@ -261,6 +261,14 @@ async function runBatch(cdp, sample) {
       }
     }
   }
+  /* 架号索引：getposcodenew 一次返回全店「订单↔架号」映射（挂衣/整理格架号写入） */
+  let rackMap = new Map();
+  try {
+    const rp = await callApi(cdp, { act: 'getposcodenew' }, 25000);
+    for (const row of (rp.data || [])) if (row && row.orderid != null) rackMap.set(String(row.orderid), String(row.poscode));
+    console.log(`  架号索引：${rackMap.size} 条（getposcodenew）`);
+  } catch (e) { console.log(`      [提示] 架号索引获取失败（${e.message}），本次订单架号将为空`); }
+
   /* 增量比对 v2：会员字段签名 + 订单列表内容签名 双重判断。
      订单数量不变但内容变化（状态推进/金额调整/架号变更等）也能被识别。 */
   const todo = [];
@@ -273,7 +281,7 @@ async function runBatch(cdp, sample) {
     /* 会员字段没变：再比对订单列表内容签名 */
     try {
       const rows = await fetchOrderList(cdp, m);
-      const lsig = listSig(rows);
+      const lsig = listSig(rows, rackMap);
       m.__lsig = lsig;
       const last = lastRowMap.get(u);
       if (last && last.listSig === lsig) { skipN++; continue; }
@@ -284,7 +292,7 @@ async function runBatch(cdp, sample) {
       chgN++; todo.push(m);
     }
   }
-  const mode = picked.length >= members.length ? '全量' : '抽样';
+  const mode = picked.length >= members.length ? '全量' : '抽样'; /* rackMap 传入详情抓取 */
   console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对 v2：内容一致跳过 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、内容有变化 ${chgN}、补抓失败 ${redoN}）`);
   console.log('');  console.log('');
 
@@ -299,7 +307,7 @@ async function runBatch(cdp, sample) {
     } catch (e) { /* ignore */ }
     const mStart = Date.now();
     let result = null, lastErr = null;
-    try { result = await fetchMemberOrders(cdp, m); }
+    try { result = await fetchMemberOrders(cdp, m, rackMap); }
     catch (e) {
       lastErr = e;
       await waitLong(120, `${m.name || uid} 抓取失败（${e.message}），按规则暂停 120 秒`);
@@ -312,8 +320,8 @@ async function runBatch(cdp, sample) {
     }
     consecutiveFail = 0; okCount++; orderTotal += result.orders.length;
     const mSec = Math.round((Date.now() - mStart) / 1000);
-    result.orders.forEach((o) => { if (o.summary && o.summary.poscode != null) o.poscode = o.summary.poscode; });
-    const lsig = (typeof m.__lsig === 'string') ? m.__lsig : '';
+    result.orders.forEach((o) => { const pc = rackMap.get(String(o.orderid)) || (o.summary && o.summary.poscode) || ''; if (pc) o.poscode = pc; });
+    const lsig = (result.listSig != null) ? result.listSig : ((typeof m.__lsig === 'string') ? m.__lsig : '');
     fs.appendFileSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), listSig: lsig, fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n', 'utf8');
     console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
     await sleep(400);
