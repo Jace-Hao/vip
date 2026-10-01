@@ -7,7 +7,7 @@
  *   2) 全量字段：会员列表接口返回的【全部字段】（csv/xlsx，含在 json 里）
  *   3) 深度详情（--deep）：逐会员抓取详情（标签、券、卡、订单、充值等）；
  *      增量比对：仅抓取新增/有变更的会员（--deep-full 可强制全量）；
- *      支持断点续传；低速安全速率；失败自动等待 180 秒重试；
+ *      支持断点续传；低速安全速率；失败自动等待 60 秒重试；
  *
  * 原理：洗衣管家是内嵌浏览器(CefSharp)的桌面程序，运行在 127.0.0.1:9222
  *       调试端口上。本工具在该端口内调用软件自身的接口读取数据。
@@ -68,15 +68,23 @@ if (!DEEP_LIMIT && process.env.LAUNDRY_DEEP_LIMIT) {
 /* ---------------- 小工具 ---------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* 追加写入 jsonl 并强制刷盘，确保 kill/断电等异常退出不丢已抓数据 */
+function appendJsonlSync(filePath, content) {
+  fs.appendFileSync(filePath, content, 'utf8');
+  try { const fd = fs.openSync(filePath, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); } catch (e) { /* fsync 失败不阻塞，仅影响极端场景下的断点续传 */ }
+}
+
 /* 失败时的长等待：等待指定秒数后再继续（等待期间每 60 秒提示一次，便于确认程序在运行） */
 async function waitLong(seconds, reason) {
   log(`      [提示] ${reason}；等待 ${seconds} 秒后自动继续...`);
-  const step = 60;
+  const step = 10;
   for (let waited = 0; waited < seconds; waited += step) {
     await sleep(Math.min(step, seconds - waited) * 1000);
-    const total = waited + step;
-    if (total < seconds) log(`        已等待 ${total} 秒 / ${seconds} 秒 ...`);
+    const elapsed = waited + step;
+    const remain = seconds - elapsed;
+    if (remain > 0) log(`        ⏳ 剩余约 ${remain} 秒 ...`);
   }
+  log(`        ✅ 等待结束，继续执行`);
 }
 let cdp = null;
 
@@ -291,7 +299,7 @@ async function fetchPageWithRetry(start, size) {
         log(`    取数失败（${e.message}），${attempt}/5，快速重试中...`);
         await sleep(1500 * attempt);
       } else {
-        await waitLong(180, `第 ${attempt} 次取数失败（${e.message}）`);
+        await waitLong(60, `第 ${attempt} 次取数失败（${e.message}）`);
       }
     }
   }
@@ -513,7 +521,7 @@ async function main() {
             }
           }
           for (const [uid, det] of detMap) {
-            cache.entries[uid] = { sig: oldSigs.get(uid) || null, detail: det };
+            cache.entries[uid] = { memberSig: oldSigs.get(uid) || null, detailSig: null, detail: det };
             seeded++;
           }
           baseline = oldSigs.size;
@@ -537,15 +545,23 @@ async function main() {
       }
     }
 
-    // 变更比对 v2：逐一获取全部会员最新详情（getuinfo 含订单列表），
-    // 按「会员字段 + 订单列表内容」双签名与缓存比对，仅变化部分写入（会员字段与订单内容变化都能识别）。
+    // 变更比对 v3：先比对 memberSig（会员列表字段），仅字段有变化的才调用 getuinfo
     let needFetch = [];
     if (DEEP_FULL) {
       log('      已指定全量刷新模式（--deep-full）：将重新获取全部会员详情');
       needFetch = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
     } else {
-      log(`      数据比对 v2：将逐一获取 ${deepTargets.length} 位会员最新详情并与缓存比对（仅变化部分写入）…`);
-      needFetch = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
+      let sigSkip = 0, sigChg = 0, noCache = 0;
+      for (const m of deepTargets) {
+        const uid = String(m.uid);
+        if (doneUids.has(uid)) continue; // 断点续传已完成的跳过
+        const e = cache.entries[uid];
+        if (!e || !e.memberSig) { noCache++; needFetch.push(m); continue; }
+        if (e.memberSig !== memberSig(m)) { sigChg++; needFetch.push(m); continue; }
+        // memberSig 一致：会员字段无变化，使用缓存中的旧详情（不调用 getuinfo）
+        sigSkip++;
+      }
+      log(`      增量比对 v3：${deepTargets.length} 人中已完成 ${doneUids.size} 人，memberSig 一致跳过 ${sigSkip} 人，需抓取 ${needFetch.length} 人（新增/无缓存 ${noCache}、字段变化 ${sigChg}）`);
     }
 
     const remaining = needFetch;
@@ -587,7 +603,7 @@ async function main() {
             const mObj = mByUid.get(String(item.uid));
             const newSig = mObj ? detailSig(mObj, item.detail) : null;
             const e = cache.entries[String(item.uid)];
-            const unchanged = !DEEP_FULL && newSig && e && e.detail && e.sig === newSig;
+            const unchanged = !DEEP_FULL && newSig && e && e.detail && e.detailSig === newSig;
             if (unchanged) {
               skippedSame++;
               done++; /* 比对一致也计入进度（否则全员无变化时进度恒 0，看起来像卡死） */
@@ -595,11 +611,11 @@ async function main() {
               appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
               done++;
               appended++;
-              /* 抓取间歇：每实际抓取 5 个会员休息 2 分钟，降低被限速风险 */
+              /* 抓取间歇：每实际抓取 500 个会员休息 1 分钟，降低被限速风险 */
               fetchedSinceRest++;
-              if (fetchedSinceRest >= 5) {
+              if (fetchedSinceRest >= 400) {
                 fetchedSinceRest = 0;
-                await waitLong(120, '已连续抓取 5 个会员，休息 2 分钟');
+                await waitLong(60, '已连续抓取 400 个会员，休息 1 分钟');
               }
             }
           } else {
@@ -608,7 +624,7 @@ async function main() {
         }
         if (appends.length || skippedSame) lastOkAt = Date.now();
         if (appends.length) {
-          fs.appendFileSync(jsonlPath, appends.join('\n') + '\n', 'utf8');
+          appendJsonlSync(jsonlPath, appends.join('\n') + '\n');
         }
         if (failed.length === 0) { pace = Math.max(1200, pace - 100); break; }
         if (attempt >= 4) {
@@ -616,7 +632,7 @@ async function main() {
           log(`      （${failed.length} 个会员多次重试仍失败，已跳过；稍后可整体重跑补抓）`);
           break;
         }
-        await waitLong(180, `本批有 ${failed.length} 个会员取数失败（第 ${attempt} 次）`);
+        await waitLong(60, `本批有 ${failed.length} 个会员取数失败（第 ${attempt} 次）`);
         batch = batch.filter((m) => failed.indexOf(m.uid) >= 0);
         if (!batch.length) break;
         /* 长等待后再自检一次登录状态 */
@@ -661,7 +677,7 @@ async function main() {
     for (const m of deepTargets) {
       const uid = String(m.uid);
       const det = fetchedMap.get(uid);
-      if (det) cache.entries[uid] = { sig: detailSig(m, det), detail: det };
+      if (det) cache.entries[uid] = { memberSig: memberSig(m), detailSig: detailSig(m, det), detail: det };
     }
     cache.savedAt = new Date().toISOString();
     try { fs.writeFileSync(cachePath, JSON.stringify(cache), 'utf8'); } catch (e) { log('      [提示] 比对缓存写入失败：' + (e && e.message)); }

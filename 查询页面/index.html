@@ -461,45 +461,13 @@ window.__renderOverview = function (members, D) {
       document.head.appendChild(s);
     }
     function orderSummaryCardHtml(o){
-      var st = o.wstatus != null ? ('状态码 ' + o.wstatus) : '—';
-      return '<div class="o-card" style="background:#FFFDF6"><div class="o-hd" style="cursor:default"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span>'+(o.poscode?('<span class="o-pos">架 '+esc(o.poscode)+'</span>'):'')+'<span class="o-amt2">¥'+fmtYuan(o.trmb)+'</span><span class="o-dt2">'+esc(o.ctime||'')+'</span></div><div class="o-bd" style="display:block;border-top:1px dashed var(--line)"><div class="o-pay">该订单的完整详情（衣物/照片/支付）尚未抓取——重跑「导出会员数据(含详情).cmd」后自动补齐。</div></div></div>';
+      var st = o.wstatus_name || (o.wstatus != null ? ('状态码 ' + o.wstatus) : '—');
+      return '<div class="o-card"><div class="o-hd"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span>'+(o.poscode?('<span class="o-pos">架 '+esc(o.poscode)+'</span>'):'')+'<span class="o-amt2">¥'+fmtYuan(o.trmb)+'</span><span class="o-dt2">'+esc(o.ctime||'')+'</span></div></div>';
     }
     function orderCardHtml(o){
-      var d = (o.detail && o.detail.data) || {};
-      var garments = (o.detail && o.detail.detail) || [];
-      var imgarr = (o.detail && o.detail.imgarr) || {};
-      var plist = (o.detail && o.detail.plist) || {};
-      var photoN = 0; for (var k in imgarr){ photoN += (imgarr[k]||[]).length; }
-      var st = d.wstatus_name || (d.wstatus!=null ? ('状态码 '+d.wstatus) : '—');
-      var hd = '<div class="o-hd"><span class="o-sn2">'+esc(o.sncode||o.orderid)+'</span><span class="o-st2">'+esc(st)+'</span>'+(o.poscode?('<span class="o-pos">架 '+esc(o.poscode)+'</span>'):'')+'<span class="o-amt2">¥'+fmtYuan(d.trmb)+'</span><span class="o-tog">[展开]</span><div class="o-dt2">'+esc(d.ctime||'')+(garments.length?(' · '+garments.length+' 件衣物'):'')+(photoN?(' · '+photoN+' 张照片'):'')+'</div></div>';
-      var bd = [];
-      if(garments.length){
-        bd.push('<table class="o-gt"><thead><tr><th>衣物</th><th>条码</th><th style="text-align:right">洗涤价</th><th style="text-align:right">实收</th></tr></thead><tbody>');
-        garments.forEach(function(g){ bd.push('<tr><td>'+esc(g.clothname||'—')+'</td><td>'+esc(g.barcode||'—')+'</td><td style="text-align:right">¥'+fmtYuan(g.trmb)+'</td><td style="text-align:right">¥'+fmtYuan(g.cutrmb)+'</td></tr>'); });
-        bd.push('</tbody></table>');
-      }
-      var figs = []; var used = {};
-      garments.forEach(function(g){ var key=String(g.washid); used[key]=1; (imgarr[key]||[]).forEach(function(im){ figs.push('<figure><a href="'+esc(im.url||im.vurl||im.iurl)+'" target="_blank"><img loading="lazy" src="'+esc(im.iurl||im.url)+'" alt="'+esc(g.clothname||'')+'"></a><figcaption>'+esc(g.clothname||'')+'</figcaption></figure>'); }); });
-      for (var k2 in imgarr){ if(used[k2]) continue; (imgarr[k2]||[]).forEach(function(im){ figs.push('<figure><a href="'+esc(im.url||im.vurl||im.iurl)+'" target="_blank"><img loading="lazy" src="'+esc(im.iurl||im.url)+'" alt=""></a><figcaption>其他照片</figcaption></figure>'); }); }
-      if(figs.length) bd.push('<div class="o-ph">'+figs.join('')+'</div>');
-      var pays = [];
-      for (var k3 in plist){ (plist[k3]||[]).forEach(function(it){ pays.push(esc(it.name||('类型'+it.ptype))+' ¥'+fmtYuan(it.rmb)+(it.time?('（'+esc(it.time)+'）'):'')); }); }
-      if(!pays.length && d.bbalance!=null && d.ebalance!=null && Number(d.bbalance)>Number(d.ebalance)){ pays.push('余额支付 ¥'+fmtYuan(Number(d.bbalance)-Number(d.ebalance))+'（余额 '+fmtYuan(d.bbalance)+' → '+fmtYuan(d.ebalance)+'）'); }
-      if(o.poscode) bd.push('<div class="o-pay">架号：'+esc(o.poscode)+'</div>');
-      if(pays.length) bd.push('<div class="o-pay">支付：'+pays.join('；')+'</div>');
-      return '<div class="o-card">'+hd+'<div class="o-bd" style="display:none">'+bd.join('')+'</div></div>';
+      return orderSummaryCardHtml(o);
     }
-    function bindOrderCards(box){
-      Array.prototype.forEach.call(box.querySelectorAll('.o-hd'), function(h){
-        h.addEventListener('click', function(){
-          var bd = h.parentNode.querySelector('.o-bd');
-          var tog = h.querySelector('.o-tog');
-          var open = bd.style.display !== 'none';
-          bd.style.display = open ? 'none' : 'block';
-          if(tog) tog.textContent = open ? '[展开]' : '[收起]';
-        });
-      });
-    }
+    
 
     if (window.__renderOverview) { try { window.__renderOverview(members, D); } catch (e) {} }
     /* ---------- 状态与筛选 ---------- */
@@ -648,15 +616,14 @@ window.__renderOverview = function (members, D) {
                 if(stEl2) stEl2.innerHTML = '订单数据加载失败（请重试或重新打开页面）';
                 return;
               }
-              /* 合并：缓存中的完整订单 + 详情接口里尚未入库的新订单（标注“详情待补抓”） */
+              /* 合并排序：缓存中的订单 + 详情中尚未入库的新订单 */
               var items = []; var have = {};
-              rec.orders.forEach(function(o){ have[String(o.orderid)] = 1; items.push({ t: 'full', o: o, ctime: ((o.detail && o.detail.data && o.detail.data.ctime) || '') }); });
-              if(d && d.order && d.order.list){ d.order.list.forEach(function(o){ if(o && o.orderid != null && !have[String(o.orderid)]) items.push({ t: 'sum', o: o, ctime: (o.ctime || '') }); }); }
+              rec.orders.forEach(function(o){ have[String(o.orderid)] = 1; items.push({ o: o, ctime: (o.ctime || '') }); });
+              if(d && d.order && d.order.list){ d.order.list.forEach(function(o){ if(o && o.orderid != null && !have[String(o.orderid)]) items.push({ o: o, ctime: (o.ctime || '') }); }); }
               items.sort(function(a, b){ return (b.ctime || '').localeCompare(a.ctime || ''); });
-              var pending = 0;
-              var cards = items.map(function(x){ if(x.t === 'full') return orderCardHtml(x.o); pending++; return orderSummaryCardHtml(x.o); });
-              if(stEl2) stEl2.innerHTML = '共 <b>' + items.length + '</b> 笔订单' + (items.length ? '（点击订单可展开衣物与照片）' : '') + (pending ? ' · ' + pending + ' 笔详情待补抓' : '');
-              if(box2){ box2.innerHTML = cards.join(''); bindOrderCards(box2); }
+              var cards = items.map(function(x){ return orderCardHtml(x.o); });
+              if(stEl2) stEl2.innerHTML = '共 <b>' + items.length + '</b> 笔订单';
+              if(box2){ box2.innerHTML = cards.join(''); }
             });
           } else {
             if(dRef && dRef.order && dRef.order.list && dRef.order.list.length){

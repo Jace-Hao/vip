@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /* ============================================================
- * 洗衣管家 · 会员订单数据抓取（试点版 v0.1）
+ * 洗衣管家 · 会员订单数据抓取
  * ------------------------------------------------------------
- * 拉取指定会员的全部订单列表与逐单详情（含衣物明细、照片链接、
- * 支付记录、状态历史等），输出：
+ * 拉取指定会员的全部订单列表（基础信息：订单号/状态/金额/时间/架号），
+ * 不再逐单拉取衣物明细/照片/支付等详情，输出：
  *   - 订单_<姓名>_<uid>_<时间>.json        完整数据（只读抓取）
  *   - 订单试点预览_<姓名>_<uid>_<时间>.html 可视化预览页（双击打开）
  *
@@ -34,7 +34,7 @@ for (const a of process.argv.slice(2)) {
 }
 if (!UID && SAMPLE <= 0) { console.error('用法: node fetch_orders.mjs --uid=<会员ID> 或 --sample=<N> [--out=目录] [--no-html]'); process.exit(1); }
 
-/* 单实例锁：同一时间只允许一个抓取任务（操作台/命令行/定时任务通用） */
+/* 单实例锁 */
 const LOCK_PATH = path.join(OUT_DIR, '.orders_run.lock');
 function acquireLock() {
   try {
@@ -42,7 +42,7 @@ function acquireLock() {
       const pid = parseInt(fs.readFileSync(LOCK_PATH, 'utf8').trim(), 10);
       let alive = false;
       try { process.kill(pid, 0); alive = true; } catch (e) { alive = false; }
-      if (alive) { console.error('[错误] 已有订单抓取任务在运行（PID ' + pid + '）。可在操作台点击“暂停”停止后重试。'); return false; }
+      if (alive) { console.error('[错误] 已有订单抓取任务在运行（PID ' + pid + '）。可在操作台点击"暂停"停止后重试。'); return false; }
     }
     fs.writeFileSync(LOCK_PATH, String(process.pid));
     return true;
@@ -63,15 +63,25 @@ function memberSig(m) {
 
 async function waitLong(seconds, reason) {
   console.log(`      [提示] ${reason}；等待 ${seconds} 秒后自动继续...`);
-  const step = 60;
+  const step = 10;
   for (let waited = 0; waited < seconds; waited += step) {
     await sleep(Math.min(step, seconds - waited) * 1000);
-    if (waited + step < seconds) console.log(`        已等待 ${waited + step} 秒 / ${seconds} 秒 ...`);
+    const elapsed = waited + step;
+    const remain = seconds - elapsed;
+    if (remain > 0) console.log(`        ⏳ 剩余约 ${remain} 秒 ...`);
   }
+  console.log(`        ✅ 等待结束，继续执行`);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/* 订单列表签名：订单内容（状态/金额/时间/架号）任一变化都会改变签名 */
+
+/* 追加写入 jsonl 并强制刷盘，确保 kill/断电等异常退出不丢已抓数据 */
+function appendJsonlSync(filePath, content) {
+  fs.appendFileSync(filePath, content, 'utf8');
+  try { const fd = fs.openSync(filePath, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); } catch (e) { /* fsync 失败不阻塞 */ }
+}
+
+/* 订单列表签名 */
 function listSig(rows, rackMap) {
   const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, (rackMap && rackMap.get(String(r.orderid))) || r.poscode || '', r.gtime, r.pctime]);
   return createHash('md5').update(JSON.stringify(mini)).digest('hex');
@@ -168,7 +178,7 @@ function loadMembersFromExport() {
   return list;
 }
 
-/* 分页拉取订单列表（只读列表，不含衣物/照片详情） */
+/* 分页拉取订单列表（仅基础信息，不拉详情） */
 async function fetchOrderList(cdp, m) {
   const uid = Number(m.uid);
   const size = 100;
@@ -186,50 +196,9 @@ async function fetchOrderList(cdp, m) {
 }
 
 async function fetchMemberOrders(cdp, m, rackMap) {
-  const uid = Number(m.uid);
-  const size = 100;
-  let start = 0, orders = [], total = null;
-  for (;;) {
-    const r = await callApi(cdp, { act: 'searchwashorders', uid, start, size, currentPage: Math.floor(start / size) + 1, currenQuantity: size });
-    if (total === null) total = Number(r.total) || 0;
-    const rows = r.data || [];
-    orders = orders.concat(rows);
-    if (orders.length >= total || rows.length < size) break;
-    start += size;
-    await sleep(350);
-  }
-  const details = [];
-  const failedRows = [];
-  for (const row of orders) {
-    let ok = false;
-    try {
-      const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
-      details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
-      ok = true;
-    } catch (e) {
-      /* 超时/失败不立即重试，记录后统一进入 2 分钟休息 */
-    }
-    if (!ok) failedRows.push(row);
-    await sleep(300);
-  }
-  /* 失败的订单：暂停 120 秒后统一补抓一轮（超时不重试，应对服务端限速/网络波动） */
-  if (failedRows.length) {
-    console.log(`  ${m.name || uid}：${failedRows.length} 笔订单取数失败，暂停 120 秒后统一补抓...`);
-    await sleep(120000);
-    const still = [];
-    for (const row of failedRows) {
-      let ok = false;
-      try {
-        const r = await callApi(cdp, { act: 'getorderdetail', orderid: row.orderid }, 25000);
-        details.push({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: r });
-        ok = true;
-      } catch (e) { /* 超时不重试 */ }
-      if (!ok) still.push(row);
-    }
-    if (still.length) console.log(`  ${m.name || uid}：仍有 ${still.length} 笔订单失败（已跳过，后续运行会自动补抓）`);
-    return { orders: details, failedOrders: still.length, complete: still.length === 0, listSig: listSig(orders, rackMap) };
-  }
-  return { orders: details, failedOrders: 0, complete: true, listSig: listSig(orders, rackMap) };
+  const orders = await fetchOrderList(cdp, m);
+  /* 仅保留订单列表基础信息，不再逐单拉取 getorderdetail */
+  return { orders, failedOrders: 0, complete: true, listSig: listSig(orders, rackMap) };
 }
 
 async function runBatch(cdp, sample) {
@@ -261,7 +230,7 @@ async function runBatch(cdp, sample) {
       }
     }
   }
-  /* 架号索引：getposcodenew 一次返回全店「订单↔架号」映射（挂衣/整理格架号写入） */
+  /* 架号索引 */
   let rackMap = new Map();
   try {
     const rp = await callApi(cdp, { act: 'getposcodenew' }, 25000);
@@ -269,8 +238,7 @@ async function runBatch(cdp, sample) {
     console.log(`  架号索引：${rackMap.size} 条（getposcodenew）`);
   } catch (e) { console.log(`      [提示] 架号索引获取失败（${e.message}），本次订单架号将为空`); }
 
-  /* 增量比对 v2：会员字段签名 + 订单列表内容签名 双重判断。
-     订单数量不变但内容变化（状态推进/金额调整/架号变更等）也能被识别。 */
+  /* 增量比对 */
   const todo = [];
   let skipN = 0, newN = 0, chgN = 0, redoN = 0;
   for (const m of picked) {
@@ -278,7 +246,6 @@ async function runBatch(cdp, sample) {
     if (doneUids.has(u) && incompleteUids.has(u)) { redoN++; todo.push(m); continue; }
     if (!doneUids.has(u)) { newN++; todo.push(m); continue; }
     if (sigMap.get(u) !== memberSig(m)) { chgN++; todo.push(m); continue; }
-    /* 会员字段没变：再比对订单列表内容签名 */
     try {
       const rows = await fetchOrderList(cdp, m);
       const lsig = listSig(rows, rackMap);
@@ -292,8 +259,8 @@ async function runBatch(cdp, sample) {
       chgN++; todo.push(m);
     }
   }
-  const mode = picked.length >= members.length ? '全量' : '抽样'; /* rackMap 传入详情抓取 */
-  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对 v2：内容一致跳过 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、内容有变化 ${chgN}、补抓失败 ${redoN}）`);
+  const mode = picked.length >= members.length ? '全量' : '抽样';
+  console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对：内容一致跳过 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、内容有变化 ${chgN}、补抓失败 ${redoN}）`);
   console.log('');  console.log('');
 
   const t0 = Date.now();
@@ -310,7 +277,7 @@ async function runBatch(cdp, sample) {
     try { result = await fetchMemberOrders(cdp, m, rackMap); }
     catch (e) {
       lastErr = e;
-      await waitLong(120, `${m.name || uid} 抓取失败（${e.message}），按规则暂停 120 秒`);
+      await waitLong(60, `${m.name || uid} 抓取失败（${e.message}），按规则暂停 60 秒`);
     }
     if (!result) {
       failCount++; consecutiveFail++;
@@ -320,15 +287,15 @@ async function runBatch(cdp, sample) {
     }
     consecutiveFail = 0; okCount++; orderTotal += result.orders.length;
     const mSec = Math.round((Date.now() - mStart) / 1000);
-    result.orders.forEach((o) => { const pc = rackMap.get(String(o.orderid)) || (o.summary && o.summary.poscode) || ''; if (pc) o.poscode = pc; });
+    result.orders.forEach((o) => { const pc = rackMap.get(String(o.orderid)) || o.poscode || ''; if (pc) o.poscode = pc; });
     const lsig = (result.listSig != null) ? result.listSig : ((typeof m.__lsig === 'string') ? m.__lsig : '');
-    fs.appendFileSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), listSig: lsig, fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n', 'utf8');
+    appendJsonlSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), listSig: lsig, fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n');
     console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
     await sleep(400);
     doneSinceRest++;
-    if (doneSinceRest >= 5 && i < todo.length - 1) {
+    if (doneSinceRest >= 10 && i < todo.length - 1) {
       doneSinceRest = 0;
-      await waitLong(120, '已连续抓取 5 人，休息 120 秒后继续');
+      await waitLong(60, '已连续抓取 10 人，休息 60 秒后继续');
     }
   }
 
@@ -360,7 +327,7 @@ async function runBatch(cdp, sample) {
 /* ---------------- 主流程 ---------------- */
 async function main() {
   console.log('==================================================');
-  console.log('   洗衣管家 · 会员订单数据抓取（试点）');
+  console.log('   洗衣管家 · 会员订单数据抓取');
   console.log('==================================================');
   if (!acquireLock()) { setTimeout(() => process.exit(1), 200); return; }
   if (UID) console.log('会员ID:', UID); else console.log(SAMPLE >= 1000000 ? '模式：全量抓取（全部有订单的会员）' : `抽样数量: ${SAMPLE}`);
@@ -380,7 +347,7 @@ async function main() {
     return;
   }
 
-  /* 1) 订单列表（分页拉全） */
+  /* 单会员模式 */
   const size = 100;
   let start = 0, orders = [], total = null;
   for (;;) {
@@ -398,50 +365,26 @@ async function main() {
   const anyRow = orders[0] || {};
   const member = { uid: Number(UID), name: anyRow.name || '', phone: anyRow.phone || '' };
 
-  /* 2) 逐单详情 */
-  console.log(`  正在抓取 ${orders.length} 笔订单详情 ...`);
-  const detailMap = new Map();
-  let failCount = 0;
-  for (const row of orders) {
-    const oid = row.orderid;
-    let ok = false;
-    for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
-      try {
-        const r = await callApi(cdp, { act: 'getorderdetail', orderid: oid }, 25000);
-        detailMap.set(String(oid), r);
-        ok = true;
-        const gN = (r.detail || []).length;
-        const pN = Object.keys(r.imgarr || {}).length;
-        console.log(`    订单 ${row.sncode} 抓取成功（衣物 ${gN} 件，照片组 ${pN}）`);
-      } catch (e) {
-        console.log(`    订单 ${row.sncode} 第 ${attempt} 次失败：${e.message}`);
-        if (attempt < 3) await sleep(2000 * attempt);
-      }
-    }
-    if (!ok) failCount++;
-    await sleep(350);
-  }
+  /* 仅保留订单列表基础信息 */
+  console.log(`  已获取 ${orders.length} 笔订单（基础信息）`);
 
-  /* 3) 保存 JSON */
   const ts = stamp();
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const payload = {
-    tool: '洗衣管家订单抓取(试点)',
+    tool: '洗衣管家订单抓取',
     fetchedAt: new Date().toISOString(),
     member,
     orderCount: orders.length,
-    fetchedCount: detailMap.size,
-    failCount,
-    orders: orders.map((row) => ({ orderid: row.orderid, sncode: row.sncode, summary: row, detail: detailMap.get(String(row.orderid)) || null })),
+    orders,
   };
   const jsonPath = path.join(OUT_DIR, `订单_${member.name || member.uid}_${UID}_${ts}.json`);
   fs.writeFileSync(jsonPath, JSON.stringify(payload), 'utf8');
   console.log('');
   console.log('  数据文件：', jsonPath);
 
-  /* 4) HTML 预览 */
+  /* HTML 预览 */
   if (MAKE_HTML) {
-    const htmlPath = path.join(OUT_DIR, `订单试点预览_${member.name || member.uid}_${UID}_${ts}.html`);
+    const htmlPath = path.join(OUT_DIR, `订单预览_${member.name || member.uid}_${UID}_${ts}.html`);
     fs.writeFileSync(htmlPath, buildHtml(payload, path.basename(jsonPath)), 'utf8');
     console.log('  预览页面：', htmlPath);
   }
@@ -452,69 +395,21 @@ async function main() {
   setTimeout(() => process.exit(0), 300);
 }
 
-/* ---------------- HTML 预览页 ---------------- */
+/* ---------------- HTML 预览页（简化版：仅订单列表表格） ---------------- */
 function buildHtml(p, jsonName) {
   const orders = p.orders;
-  let totalRmb = 0, totalCloth = 0, totalPhotos = 0;
-  const sections = [];
-  for (const o of orders) {
-    const d = (o.detail && o.detail.data) || {};
-    const garments = (o.detail && o.detail.detail) || [];
-    const imgarr = (o.detail && o.detail.imgarr) || {};
-    const plist = (o.detail && o.detail.plist) || {};
-    totalRmb += Number(d.trmb) || 0;
-    totalCloth += garments.length;
-
-    // 衣物表
-    let gtable = '';
-    if (garments.length) {
-      const rows = garments.map((g) => `<tr><td>${esc(g.clothname || '—')}</td><td>${esc(g.barcode || '—')}</td><td class="num">¥${fmtYuan(g.trmb)}</td><td class="num">¥${fmtYuan(g.cutrmb)}</td></tr>`).join('');
-      gtable = `<table><thead><tr><th>衣物</th><th>条码</th><th class="num">洗涤价</th><th class="num">实收</th></tr></thead><tbody>${rows}</tbody></table>`;
-    }
-    // 照片（按衣物 join）
-    const usedKeys = new Set();
-    const figs = [];
-    for (const g of garments) {
-      const key = String(g.washid);
-      const imgs = imgarr[key] || [];
-      usedKeys.add(key);
-      for (const im of imgs) {
-        totalPhotos++;
-        figs.push(`<figure><a href="${esc(im.url || im.vurl || im.iurl)}" target="_blank"><img loading="lazy" src="${esc(im.iurl || im.url)}" alt="${esc(g.clothname || '')}"></a><figcaption>${esc(g.clothname || '')}</figcaption></figure>`);
-      }
-    }
-    for (const k of Object.keys(imgarr)) {
-      if (usedKeys.has(k)) continue;
-      for (const im of (imgarr[k] || [])) {
-        totalPhotos++;
-        figs.push(`<figure><a href="${esc(im.url || im.vurl || im.iurl)}" target="_blank"><img loading="lazy" src="${esc(im.iurl || im.url)}" alt="订单照片"></a><figcaption>其他照片</figcaption></figure>`);
-      }
-    }
-    const photos = figs.length ? `<div class="photos">${figs.join('')}</div>` : '';
-    // 支付（优先用明细 plist；服务端未返回明细时按账户余额变化推算）
-    const pays = [];
-    for (const k of Object.keys(plist)) {
-      for (const item of (plist[k] || [])) pays.push(`${esc(item.name || ('类型' + item.ptype))} ¥${fmtYuan(item.rmb)}${item.time ? '（' + esc(item.time) + '）' : ''}`);
-    }
-    if (!pays.length && d.bbalance != null && d.ebalance != null && Number(d.bbalance) > Number(d.ebalance)) {
-      const diff = Number(d.bbalance) - Number(d.ebalance);
-      pays.push(`余额支付 ¥${fmtYuan(diff)}（账户余额 ${fmtYuan(d.bbalance)} → ${fmtYuan(d.ebalance)}）`);
-    }
-    const payLine = pays.length ? `<div class="pays">支付：${pays.join('；')}</div>` : '';
-
-    const st = d.wstatus_name || ('状态码 ' + (d.wstatus != null ? d.wstatus : '—'));
-    sections.push(`<section class="order">
-  <div class="o-head">
-    <span class="o-sn">单号 ${esc(o.sncode)}<small>订单ID ${esc(o.orderid)}</small></span>
-    <span class="o-status">${esc(st)}</span>
-    <span class="o-amt">¥${fmtYuan(d.trmb)}</span>
-    <span class="o-time">${esc(d.ctime || '')}</span>
-  </div>
-  ${gtable}
-  ${photos}
-  ${payLine}
-</section>`);
-  }
+  let totalRmb = 0;
+  const rows = orders.map((o) => {
+    totalRmb += Number(o.trmb) || 0;
+    return `<tr>
+      <td>${esc(o.sncode)}</td>
+      <td>${esc(o.orderid)}</td>
+      <td class="num">¥${fmtYuan(o.trmb)}</td>
+      <td>${esc(o.wstatus_name || ('状态码 ' + (o.wstatus != null ? o.wstatus : '—')))}</td>
+      <td class="time">${esc(o.ctime || '')}</td>
+      <td>${esc(o.poscode || '')}</td>
+    </tr>`;
+  }).join('');
 
   const css = `
   :root { --ink:#1c2430; --sub:#5b6675; --line:#e2e6ee; --accent:#2b54a8; }
@@ -525,45 +420,32 @@ function buildHtml(p, jsonName) {
   .meta { color:var(--sub); font-size:13px; }
   .stats { margin:18px 0 4px; padding:12px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px 30px; font-size:13.5px; }
   .stats b { color:var(--accent); font-variant-numeric:tabular-nums; font-weight:700; }
-  .order { padding:18px 0 20px; border-bottom:1px solid var(--line); }
-  .o-head { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:baseline; }
-  .o-sn { font-weight:700; font-variant-numeric:tabular-nums; }
-  .o-sn small { color:var(--sub); font-weight:400; margin-left:8px; font-size:12px; }
-  .o-status { font-size:12.5px; border:1px solid var(--line); padding:1px 8px; border-radius:3px; color:var(--sub); }
-  .o-amt { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; margin-left:auto; }
-  .o-time { color:var(--sub); font-size:12.5px; font-variant-numeric:tabular-nums; }
-  table { border-collapse:collapse; width:100%; margin:10px 0 2px; font-size:13px; }
-  th { text-align:left; color:var(--sub); font-weight:600; border-bottom:1px solid var(--line); padding:5px 8px 5px 0; }
-  td { border-bottom:1px solid #eef1f5; padding:5px 8px 5px 0; font-variant-numeric:tabular-nums; }
-  th.num, td.num { text-align:right; padding-right:0; }
-  .photos { display:flex; flex-wrap:wrap; gap:10px; margin:10px 0 2px; }
-  figure { margin:0; }
-  figure img { width:110px; height:110px; object-fit:cover; border:1px solid var(--line); border-radius:3px; background:#eceff3; display:block; }
-  figcaption { font-size:11.5px; color:var(--sub); margin-top:3px; max-width:110px; }
-  .pays { font-size:12.5px; color:var(--sub); margin-top:6px; }
+  table { border-collapse:collapse; width:100%; margin:16px 0; font-size:13px; }
+  th { text-align:left; color:var(--sub); font-weight:600; border-bottom:2px solid var(--line); padding:6px 8px 6px 0; }
+  td { border-bottom:1px solid #eef1f5; padding:6px 8px 6px 0; font-variant-numeric:tabular-nums; }
+  th.num, td.num { text-align:right; }
+  .time { color:var(--sub); font-size:12.5px; }
   .note { margin-top:26px; font-size:12.5px; color:var(--sub); border-top:1px solid var(--line); padding-top:12px; }
-  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
-  @media (max-width:520px){ figure img { width:86px; height:86px; } .o-amt { margin-left:0; } }`;
+  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }`;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>会员订单数据 · 试点预览</title><style>${css}</style></head>
+<title>会员订单数据 · 预览</title><style>${css}</style></head>
 <body><div class="page">
 <header>
-  <h1>会员订单数据 · 抓取试点</h1>
+  <h1>会员订单数据 · 预览</h1>
   <div class="meta">${esc(p.member.name || '（未登记姓名）')} ｜ ${esc(p.member.phone)} ｜ 会员ID ${esc(p.member.uid)} ｜ 抓取时间 ${esc(new Date(p.fetchedAt).toLocaleString('zh-CN'))}</div>
 </header>
 <div class="stats">
   <span>订单 <b>${orders.length}</b> 笔</span>
   <span>合计消费 <b>¥${fmtYuan(totalRmb)}</b></span>
-  <span>衣物 <b>${totalCloth}</b> 件</span>
-  <span>照片 <b>${totalPhotos}</b> 张</span>
-  <span>抓取成功 <b>${p.fetchedCount}</b> / ${p.orderCount}</span>
 </div>
-${sections.join('\n')}
+<table><thead><tr>
+  <th>业务码</th><th>订单ID</th><th class="num">金额</th><th>状态</th><th>时间</th><th>架号</th>
+</tr></thead><tbody>${rows}</tbody></table>
 <div class="note">
-  本页为「会员订单详情抓取」功能的单会员试点演示：数据来自洗衣管家只读抓取，包含每笔订单的衣物明细与照片链接（照片存于云端，需联网查看；点击缩略图可看原图）。<br>
-  完整原始数据（含全部字段）：同目录下的 <a href="./${esc(jsonName)}">${esc(jsonName)}</a>
+  数据来自洗衣管家只读抓取，仅含订单基础信息。<br>
+  完整原始数据：同目录下的 <a href="./${esc(jsonName)}">${esc(jsonName)}</a>
 </div>
 </div></body></html>`;
 }
