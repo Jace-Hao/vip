@@ -49,6 +49,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .b-dan:hover:not(:disabled){background:#FDEEEA}
 .state{font-size:12px;color:var(--text-sub)}
 .state b{color:var(--text-strong)}
+.state div{color:var(--text-sub)}
 .st-ok{color:var(--green)} .st-bad{color:var(--coral)} .st-warn{color:var(--amber)}
 .log{background:var(--bg-dark);border:1px solid var(--stroke-dark);border-radius:8px;padding:10px 12px;color:#c8d6ee;font:11.5px/1.7 Consolas,monospace;max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-all;display:none;margin-top:8px}
 .url{background:#EAF2FB;border:1px solid #C9DDF2;color:var(--primary-deep);border-radius:6px;padding:6px 10px;font-size:12.5px;word-break:break-all;display:none;margin-top:8px;cursor:pointer}
@@ -115,14 +116,24 @@ button:disabled{opacity:.45;cursor:not-allowed}
     </div>
 
     <div class="tile">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v4h-4"/></svg></div>
+      <h3>重启服务</h3>
+      <p>重启本地服务（8791），用于让代码改动或配置生效。有任务运行时会拒绝。</p>
+      <div class="acts"><button class="b-sec" id="btnRestart">重启</button></div>
+      <div class="state" id="rsState">—</div>
+    </div>
+
+    <div class="tile">
       <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M9 6l3-3 3 3"/><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 15h8"/></svg></div>
       <h3>开机自启（服务）</h3>
-      <p>登录 Windows 30 秒后后台自动启动本地服务，无窗口。</p>
+      <p>登录 Windows 后自动后台启动本地服务，无窗口、不需管理员权限。</p>
       <div class="acts">
         <button class="b-pri" id="btnAsInstall">安装</button>
         <button class="b-dan" id="btnAsRemove">移除</button>
+        <button class="b-sec" id="btnAsDiag">自检</button>
       </div>
       <div class="state" id="asState">—</div>
+      <div class="log" id="asDiag" style="display:none"></div>
     </div>
 
     <div class="tile">
@@ -157,6 +168,7 @@ function toast(m){var t=document.getElementById('toast');t.textContent=m;t.style
 function fmt(n){return (Number(n)||0).toLocaleString('zh-CN');}
 
 var tunTimer=null;
+var asHold=0;   /* 开机自启操作结果的保留截止时间戳（避免被 3 秒轮询覆盖） */
 function refresh(){
   api('/api/hub/status').then(function(r){
     if(r.code!==200){return;}
@@ -169,15 +181,19 @@ function refresh(){
       ?'<span class="chip">定时 <b>每天 '+s.schedule.time+'</b>'+(s.schedule.shutdownAfter?' · 同步后关机':'')+'</span>'
       :'<span class="chip">定时 <b>未启用</b></span>');
     chips.push(s.autostart==='installed'?'<span class="chip ok">开机自启 <b>已安装</b></span>':'<span class="chip">开机自启 <b>未安装</b></span>');
-    chips.push(s.tunnel.running?'<span class="chip ok">隧道 <b>开启</b></span>':'<span class="chip">隧道 <b>关闭</b></span>');
+    chips.push(s.tunnel.running?(s.tunnel.url?'<span class="chip ok">隧道 <b>开启</b></span>':'<span class="chip">隧道 <b>启动中</b></span>'):'<span class="chip">隧道 <b>关闭</b></span>');
     document.getElementById('chips').innerHTML=chips.join('');
-    var t=document.getElementById('tunState');
-    if(s.tunnel.running){t.innerHTML='运行中'+(s.tunnel.url?' — 地址见下方':'（地址生成中，几秒后刷新）');}
-    else{t.textContent='未开启';}
-    var u=document.getElementById('tunUrl');
-    if(s.tunnel.running&&s.tunnel.url){u.style.display='block';u.textContent=s.tunnel.url;}
-    else if(!s.tunnel.running){u.style.display='none';}
-    document.getElementById('asState').innerHTML=s.autostart==='installed'?'<b class="st-ok">已安装</b>':'未安装';
+    /* 隧道四态：开启中 / 成功（有地址）/ 失败 / 已关闭 */
+    var t=document.getElementById('tunState'),u=document.getElementById('tunUrl'),tn=s.tunnel||{};
+    if(tn.error){t.innerHTML='<b class="st-bad">启动失败</b> · '+esc(tn.error);u.style.display='none';}
+    else if(tn.running&&tn.url){t.innerHTML='<b class="st-ok">运行中</b> — 地址见下方（点击可复制）';u.style.display='block';u.textContent=tn.url;}
+    else if(tn.running){t.innerHTML='<b class="st-warn">开启中…</b> 公网地址生成需要几秒，本页会自动刷新';u.style.display='none';}
+    else{t.textContent='未开启';u.style.display='none';}
+    /* 安装/卸载刚操作完时，保留 asGo 写入的明确成功/失败文案约 6 秒，避免被本轮询立刻覆盖 */
+    if(!asBusy && (!asHold || Date.now()>asHold)){
+      asHold=0;
+      document.getElementById('asState').innerHTML=s.autostart==='installed'?'<b class="st-ok">已安装</b> · 登录后自动启动':'未安装';
+    }
     var es=document.getElementById('expState');
     if(s.export.running){
       es.innerHTML='<b class="st-warn">'+(s.export.kind==='deep'?'完整导出':'快速导出')+'进行中</b> · '+(s.export.startedAt?Math.round((Date.now()-new Date(s.export.startedAt).getTime())/1000):0)+' 秒';
@@ -195,12 +211,15 @@ function refresh(){
     }
   }).catch(function(){});
 }
+/* 注意参数顺序：act(路径, 请求体, 成功提示)。
+   原实现的调用点都多传了一个 'POST'（错位到 body），导致请求体被发成字符串 "POST"，
+   例如导出的 mode:'deep' 根本没到后端，完整导出实际一直在跑快速导出。 */
 function act(path,body,okMsg){return api(path,'POST',body||{}).then(function(r){toast(r.j&&r.j.error?r.j.error:(okMsg||'已完成'));return r;});}
 document.getElementById('goViewer').addEventListener('click',function(){location.href='/查询页面/index.html';});
 document.getElementById('goConsole').addEventListener('click',function(){location.href='/';});
-document.getElementById('btnExpQuick').addEventListener('click',function(){act('/api/hub/export','POST',{mode:'quick'},'快速导出已启动').then(refresh);});
-document.getElementById('btnExpDeep').addEventListener('click',function(){act('/api/hub/export','POST',{mode:'deep'},'完整导出已启动（几分钟，可离开）').then(refresh);});
-document.getElementById('btnExpStop').addEventListener('click',function(){act('/api/hub/export/stop','POST',null,'已停止').then(refresh);});
+document.getElementById('btnExpQuick').addEventListener('click',function(){act('/api/hub/export',{mode:'quick'},'快速导出已启动').then(refresh);});
+document.getElementById('btnExpDeep').addEventListener('click',function(){act('/api/hub/export',{mode:'deep'},'完整导出已启动（几分钟，可离开）').then(refresh);});
+document.getElementById('btnExpStop').addEventListener('click',function(){act('/api/hub/export/stop',null,'已停止').then(refresh);});
 document.getElementById('btnDebug').addEventListener('click',function(){
   var b=this;b.disabled=true;document.getElementById('dbgState').textContent='检测中（如需重启软件约需 90 秒）…';
   api('/api/hub/ensure-debug','POST',{}).then(function(r){
@@ -209,13 +228,138 @@ document.getElementById('btnDebug').addEventListener('click',function(){
     refresh();
   });
 });
+var tunBusy=false;
+function tunBtn(on){tunBusy=on;document.getElementById('btnTunStart').disabled=on;document.getElementById('btnTunStop').disabled=on;}
 document.getElementById('btnTunStart').addEventListener('click',function(){
-  act('/api/hub/tunnel/start','POST',null,'隧道启动中').then(function(){setTimeout(refresh,3000);setTimeout(refresh,8000);});
+  if(tunBusy)return;                                  /* 防重复点击 */
+  if(document.getElementById('tunState').textContent.indexOf('开启中')>=0){toast('隧道正在开启中，请勿重复点击');return;}
+  tunBtn(true);
+  document.getElementById('tunState').innerHTML='<b class="st-warn">正在开启…</b>';
+  api('/api/hub/tunnel/start','POST',{}).then(function(r){
+    var j=r.j||{};
+    if(j.error){document.getElementById('tunState').innerHTML='<b class="st-bad">启动失败</b> · '+esc(j.error);toast(j.error);}
+    else if(j.already&&j.url){toast('隧道已在运行');}
+    else{toast('隧道启动中，地址约需几秒生成');}
+    tunBtn(false);
+    /* 地址是异步生成的，多轮询几次直到出现 */
+    setTimeout(refresh,2000);setTimeout(refresh,5000);setTimeout(refresh,9000);setTimeout(refresh,15000);
+  }).catch(function(e){
+    tunBtn(false);
+    document.getElementById('tunState').innerHTML='<b class="st-bad">启动失败</b> · 无法连接本地服务';
+    toast('启动失败：无法连接本地服务');
+  });
 });
-document.getElementById('btnTunStop').addEventListener('click',function(){act('/api/hub/tunnel/stop','POST',null,'隧道已关闭').then(refresh);});
+document.getElementById('btnTunStop').addEventListener('click',function(){
+  if(tunBusy)return;                                  /* 防重复点击 */
+  tunBtn(true);
+  document.getElementById('tunState').innerHTML='<b class="st-warn">正在关闭…</b>';
+  api('/api/hub/tunnel/stop','POST',{}).then(function(r){
+    var j=r.j||{};
+    if(j.error){document.getElementById('tunState').innerHTML='<b class="st-bad">关闭失败</b> · '+esc(j.error);toast(j.error);}
+    else{toast(j.already?'隧道未在运行':'隧道已关闭');}
+    tunBtn(false);refresh();
+  }).catch(function(e){
+    tunBtn(false);
+    document.getElementById('tunState').innerHTML='<b class="st-bad">关闭失败</b> · 无法连接本地服务';
+    toast('关闭失败：无法连接本地服务');
+  });
+});
 document.getElementById('tunUrl').addEventListener('click',function(){document.execCommand('copy');toast('已选中，Ctrl+C 复制');window.getSelection().selectAllChildren(this);});
-document.getElementById('btnAsInstall').addEventListener('click',function(){act('/api/hub/autostart','POST',{action:'install'},'开机自启已安装').then(refresh);});
-document.getElementById('btnAsRemove').addEventListener('click',function(){act('/api/hub/autostart','POST',{action:'remove'},'开机自启已移除').then(refresh);});
+/* ---------- 开机自启（服务） ---------- */
+var asBusy=false;
+function asSet(html){document.getElementById('asState').innerHTML=html;}
+function asGo(btn,action,verb){
+  if(asBusy)return;                                  /* 防重复点击 / 并发调用 */
+    asBusy=true;btn.disabled=true;
+    asSet('<b class="st-warn">'+verb+'中…</b>');
+  api('/api/hub/autostart','POST',{action:action}).then(function(r){
+    var j=r.j||{};
+    asBusy=false;btn.disabled=false;asHold=Date.now()+6000;   /* 结果文案保留 6 秒 */
+    if(j.error){asSet('<b class="st-bad">'+verb+'失败</b><div style="margin-top:4px;white-space:pre-wrap;font-size:11.5px">'+esc(j.error)+'</div>');toast(verb+'失败：'+String(j.error).split('\n')[0]);return;}
+    asSet('<b class="st-ok">'+(j.message||(verb+'成功'))+'</b>');toast(j.message||(verb+'成功'));
+  }).catch(function(){
+    asBusy=false;btn.disabled=false;asHold=Date.now()+6000;
+    asSet('<b class="st-bad">'+verb+'失败</b> · 无法连接本地服务');toast(verb+'失败：无法连接本地服务');
+  });
+}
+document.getElementById('btnAsInstall').addEventListener('click',function(){asGo(this,'install','安装');});
+document.getElementById('btnAsRemove').addEventListener('click',function(){asGo(this,'remove','卸载');});
+
+/* 开机自启自检：实测能否写入启动文件夹，一键区分「权限不足」与「环境拦截」 */
+document.getElementById('btnAsDiag').addEventListener('click',function(){
+  var btn=this;btn.disabled=true;
+  asSet('<b class="st-warn">自检中…</b>');
+  var box=document.getElementById('asDiag');box.style.display='block';box.textContent='正在检测…';
+  api('/api/hub/autostart/diag','GET').then(function(r){
+    btn.disabled=false;
+    var j=r.j||{};
+    if(!j.ok){box.textContent='自检失败：'+((j.error&&j.error.message)||j.error||'未知错误');asSet('<b class="st-bad">自检失败</b>');return;}
+    var d=j.diag||{},L=[];
+    L.push('【运行身份】'+(d.identity&&d.identity.user||'未知'));
+    var sd=d.startupDir||{};
+    L.push('');
+    L.push('【启动文件夹】');
+    L.push('  路径：'+(sd.path||''));
+    L.push('  是否存在：'+(sd.exists?'是':'否'));
+    L.push('  是否可写：'+(sd.writable?'是':'否')+(sd.error?('  ← '+sd.error):''));
+    if(sd.tmpWritable!=null){
+      L.push('  目录整体可写：'+(sd.tmpWritable?'是':'否')+' ｜ .lnk 快捷方式：'+(sd.lnkWritable?'可写':'被拦截')+' ｜ .vbs 脚本：'+(sd.vbsWritable?'可写':'被拦截'));
+    }
+    var en=d.entry||{};
+    L.push('  已注册开机自启：'+(en.installed?'是':'否'));
+    var st=d.schtask||d.schtasks||{};
+    L.push('');
+    L.push('【备用方案】schtasks：'+(st.available?'可用':'不可用')+(st.error?('  ← '+st.error):''));
+    L.push('');
+    L.push('【结论】'+(d.verdict||''));
+    (d.advice||[]).forEach(function(a){L.push('  · '+a);});
+    box.textContent=L.join('\n');
+    asSet(d.canInstall?'<b class="st-ok">可安装</b> · '+esc(d.verdict||''):'<b class="st-bad">当前不可安装</b> · '+esc(d.verdict||''));
+  }).catch(function(){
+    btn.disabled=false;
+    document.getElementById('asDiag').textContent='自检失败：无法连接本地服务';
+    asSet('<b class="st-bad">自检失败</b> · 无法连接本地服务');
+  });
+});
+
+/* ---------- 重启服务 ---------- */
+var rsBusy=false;
+function rsSet(html){document.getElementById('rsState').innerHTML=html;}
+document.getElementById('btnRestart').addEventListener('click',function(){
+  if(rsBusy)return;                                   /* 防重复点击 / 并发调用 */
+  if(!window.confirm('确定要重启本地服务吗？\n\n· 重启后本页会自动重新连接（约 5 秒）\n· 正在进行的抓取或导出会被中断，请先停止\n· 仅重启服务，不会关闭洗衣管家软件'))return;
+  var btn=this;rsBusy=true;btn.disabled=true;
+  rsSet('<b class="st-warn">重启中…</b> 服务将在约 5 秒后恢复');
+  api('/api/hub/restart','POST',{}).then(function(r){
+    var j=r.j||{};
+    if(j.error){rsBusy=false;btn.disabled=false;rsSet('<b class="st-bad">未重启</b> · '+esc(j.error));toast(j.error);return;}
+    toast('服务重启中…');waitServiceBack(btn);
+  }).catch(function(){waitServiceBack(btn);});        /* 服务已断开也属预期，进入等待恢复流程 */
+});
+/* 重启后服务会短暂不可达：轮询直到恢复，超时给出可读提示 */
+function waitServiceBack(btn){
+  var tries=0,timer=null;
+  function probe(){
+    tries++;
+    api('/api/status').then(function(r){
+      if(r.code!==200){rsSet('<b class="st-bad">异常</b> · 服务返回状态码 '+r.code);rsBusy=false;btn.disabled=false;return;}
+      clearInterval(timer);
+      rsBusy=false;btn.disabled=false;rsSet('<b class="st-ok">已重启</b> · 服务已恢复');toast('服务已重启');
+      refresh();
+    }).catch(function(){
+      if(tries>=20){                                  /* 约 40 秒仍未恢复 */
+        clearInterval(timer);
+        rsBusy=false;btn.disabled=false;
+        rsSet('<b class="st-bad">重启失败</b> · 服务未恢复，请手动运行「打开订单抓取操作台.cmd」');
+        toast('服务未恢复，请手动重启');
+        return;
+      }
+      rsSet('<b class="st-warn">重启中…</b> 等待服务恢复（'+tries+'/20）');
+    });
+  }
+  timer=setInterval(probe,2000);
+  setTimeout(probe,4500);                             /* 首次探测留足启动时间 */
+}
 document.getElementById('btnFolder').addEventListener('click',function(){api('/api/open','POST',{what:'folder'});toast('已在资源管理器打开');});
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 refresh();

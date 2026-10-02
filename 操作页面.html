@@ -165,7 +165,7 @@
       ['目标（有订单）', s.withOrders != null ? s.withOrders : '—'],
       ['已完成会员', s.doneMembers != null ? s.doneMembers : '—'],
       ['累计订单', s.ordersTotal != null ? s.ordersTotal : '—'],
-      ['预计剩余', st.etaMin != null ? (st.etaMin + ' 分钟') : (st.running ? '估算中' : '—')],
+      ['预计剩余', (st.running && st.etaMin != null) ? (st.etaMin + ' 分钟') : '—'],
       ['耗时', st.startedAt ? (st.elapsedSec + ' 秒') : '—']
     ];
     $('#stats').innerHTML = items.map(function(x){ return '<div class="stat"><div class="k">' + x[0] + '</div><div class="v">' + x[1] + '</div></div>'; }).join('');

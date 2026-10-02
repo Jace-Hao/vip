@@ -7,25 +7,52 @@
  *   2) 全量字段：会员列表接口返回的【全部字段】（csv/xlsx，含在 json 里）
  *   3) 深度详情（--deep）：逐会员抓取详情（标签、券、卡、订单、充值等）；
  *      增量比对：仅抓取新增/有变更的会员（--deep-full 可强制全量）；
- *      支持断点续传；低速安全速率；失败自动等待 60 秒重试；
+ *      支持断点续传；统一限速（最小间隔+抖动+小时预算）；失败按指数退避等待重试；
  *
  * 原理：洗衣管家是内嵌浏览器(CefSharp)的桌面程序，运行在 127.0.0.1:9222
  *       调试端口上。本工具在该端口内调用软件自身的接口读取数据。
  * 只读用途：不会修改软件内任何内容。
  * 依赖：Node.js 18+（内置 fetch / WebSocket，无第三方包）
  * 用法：node export.mjs [--deep] [--deep-full] [--deep-limit=N] [--out=目录] [--page-size=200]
+ *       [--min-interval=2200] [--jitter=1000]
+ *
+ * 限速（重要）：
+ *   洗衣管家服务端有风控，短时间大量请求会导致接口「冷却」甚至直接踢掉登录账号。
+ *   所有接口调用均经 app/rate_limit.mjs 统一限速，参数可用命令行或环境变量覆盖：
+ *     --min-interval=<毫秒>   相邻请求最小间隔（默认 2200）
+ *     --jitter=<毫秒>         额外随机抖动上限（默认 1000）
+ *     LAUNDRY_MIN_INTERVAL_MS / LAUNDRY_JITTER_MS
+ *   夜间慢速跑示例：
+ *     set LAUNDRY_MIN_INTERVAL_MS=5000 & node export.mjs --deep
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { RateLimiter, pickNum, backoffSeconds } from './rate_limit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+const ARGV = process.argv.slice(2);
 
 /* ---------------- 配置 ---------------- */
 const CDP_BASE = 'http://127.0.0.1:9222';
 const STATUS_MAP = { 0: '正常', 1: '禁用' };
+
+/* ---------------- 限速配置（防止触发服务端风控被踢下线） ---------------- */
+/* 默认值按「安全优先」设定：约 1962 个会员的详情阶段约需 5~7 小时，
+   配合断点续传可在夜间跑完；如需更快/更慢，用上面的参数覆盖即可。 */
+const MIN_INTERVAL_MS = pickNum({ argv: ARGV, arg: 'min-interval', env: 'LAUNDRY_MIN_INTERVAL_MS', def: 2200 });
+const JITTER_MS = pickNum({ argv: ARGV, arg: 'jitter', env: 'LAUNDRY_JITTER_MS', def: 1000 });
+/* 每实际抓取 REST_EVERY 个会员后长休息，休息时长随连续失败指数退避（REST_BASE_SEC → REST_MAX_SEC） */
+const REST_EVERY = pickNum({ argv: ARGV, arg: 'rest-every', env: 'LAUNDRY_REST_EVERY', def: 60 });
+const REST_BASE_SEC = pickNum({ argv: ARGV, arg: 'rest-sec', env: 'LAUNDRY_REST_SEC', def: 90 });
+const REST_MAX_SEC = pickNum({ argv: ARGV, arg: 'rest-max', env: 'LAUNDRY_REST_MAX', def: 900 });
+/* 单批失败后的等待：60 → 120 → 240 … 秒（指数退避，上限 FAIL_MAX_SEC） */
+const FAIL_BASE_SEC = pickNum({ argv: ARGV, arg: 'fail-sec', env: 'LAUNDRY_FAIL_SEC', def: 60 });
+const FAIL_MAX_SEC = pickNum({ argv: ARGV, arg: 'fail-max', env: 'LAUNDRY_FAIL_MAX', def: 600 });
+/* 深度抓取批次大小：固定为 1，使 Node 侧能对每个会员精确限速（页内脚本连发无法限速） */
+const DEEP_BATCH = 1;
 
 /* 全量字段的中文名（仅收录有把握的；未收录的字段以原字段名显示） */
 const FULL_LABELS = {
@@ -89,6 +116,14 @@ async function waitLong(seconds, reason) {
 let cdp = null;
 
 function log(...args) { console.log(...args); }
+
+/* 全局限速器：所有对洗衣管家的接口调用都必须先 acquire() */
+const limiter = new RateLimiter({
+  name: '会员导出',
+  minIntervalMs: MIN_INTERVAL_MS,
+  jitterMs: JITTER_MS,
+  log,
+});
 
 function die(msg, code = 1) {
   console.error('\n[错误] ' + msg);
@@ -286,6 +321,7 @@ async function fetchPageWithRetry(start, size) {
   let lastErr;
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
+      await limiter.acquire();
       const raw = await cdp.evaluate(pageExpr(start, size), 40000);
       if (typeof raw !== 'string') throw new Error('页面返回内容异常');
       const res = JSON.parse(raw);
@@ -299,7 +335,9 @@ async function fetchPageWithRetry(start, size) {
         log(`    取数失败（${e.message}），${attempt}/5，快速重试中...`);
         await sleep(1500 * attempt);
       } else {
-        await waitLong(60, `第 ${attempt} 次取数失败（${e.message}）`);
+        /* 指数退避（与其它失败分支完全同口径）：60 → 120 → 240 秒，上限 FAIL_MAX_SEC */
+        const waitSec = backoffSeconds(attempt, FAIL_BASE_SEC, FAIL_MAX_SEC);
+        await waitLong(waitSec, `第 ${attempt} 次取数失败（${e.message}），退避 ${waitSec} 秒`);
       }
     }
   }
@@ -310,6 +348,7 @@ async function fetchPageWithRetry(start, size) {
 async function fetchDetailBatch(uids, isSplit = false) {
   if (!uids.length) return [];
   try {
+    await limiter.acquire();
     const raw = await cdp.evaluate(deepExpr(uids), isSplit ? 45000 : 60000);
     if (typeof raw !== 'string') throw new Error('页面返回异常');
     const res = JSON.parse(raw);
@@ -319,6 +358,10 @@ async function fetchDetailBatch(uids, isSplit = false) {
     if (uids.length === 1 || isSplit) {
       return uids.map((u) => ({ uid: u, error: '失败: ' + e.message }));
     }
+    /* 说明：当前 DEEP_BATCH = 1（见文件顶部限速配置），uids.length 恒为 1，
+       上面的 `uids.length === 1` 分支必然命中，因此本段二分拆分【不会被执行】。
+       保留它是因为一旦将来把 DEEP_BATCH 调大，拆批隔离逻辑立刻重新生效，
+       请勿误判为不可达代码而删除。 */
     await sleep(2500);
     const half = Math.ceil(uids.length / 2);
     const a = await fetchDetailBatch(uids.slice(0, half), true);
@@ -548,7 +591,10 @@ async function main() {
     // 变更比对 v3：先比对 memberSig（会员列表字段），仅字段有变化的才调用 getuinfo
     let needFetch = [];
     if (DEEP_FULL) {
-      log('      已指定全量刷新模式（--deep-full）：将重新获取全部会员详情');
+      const fullN = deepTargets.filter((m) => !doneUids.has(String(m.uid))).length;
+      log(`      已指定全量刷新模式（--deep-full）：将重新获取全部会员详情（本次 ${fullN} 个）`);
+      log('      [提醒] 全量刷新会跳过增量比对，请求数直接等于会员数，最容易触发服务端风控；');
+      log('             日常同步请勿加 --deep-full，让工具按 memberSig 只抓新增/有变更的会员。');
       needFetch = deepTargets.filter((m) => !doneUids.has(String(m.uid)));
     } else {
       let sigSkip = 0, sigChg = 0, noCache = 0;
@@ -572,12 +618,15 @@ async function main() {
     log('');
     log(`[5/5] 正在抓取会员详情（本次需获取 ${remaining.length} 个 / 共 ${deepTargets.length} 个）...`);
 
-    const BATCH = 5;
+    const BATCH = DEEP_BATCH; /* 固定 1：逐会员限速，避免页内连发造成瞬时突发 */
     const errors = [];
     let done = 0;
-    let pace = 1500;
     let lastOkAt = Date.now();
     let stopAll = false;
+    let restSec = REST_BASE_SEC;   /* 长休息时长，连续失败时指数退避，成功后回落 */
+    let consecFail = 0;
+    log(`      限速设置：最小间隔 ${MIN_INTERVAL_MS}ms + 抖动 0~${JITTER_MS}ms`);
+    log(`      初始状态：${limiter.usage()}`);
     for (let i = 0; i < remaining.length; i += BATCH) {
       /* 登录状态自检：若被软件登出立即停止（避免无效重试） */
       try {
@@ -611,11 +660,11 @@ async function main() {
               appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
               done++;
               appended++;
-              /* 抓取间歇：每实际抓取 500 个会员休息 1 分钟，降低被限速风险 */
+              /* 抓取间歇：每实际抓取 REST_EVERY 个会员长休息一次，降低被限速风险 */
               fetchedSinceRest++;
-              if (fetchedSinceRest >= 400) {
+              if (fetchedSinceRest >= REST_EVERY) {
                 fetchedSinceRest = 0;
-                await waitLong(60, '已连续抓取 400 个会员，休息 1 分钟');
+                await waitLong(restSec, `已连续抓取 ${REST_EVERY} 个会员，休息 ${restSec} 秒（${limiter.usage()}）`);
               }
             }
           } else {
@@ -626,13 +675,33 @@ async function main() {
         if (appends.length) {
           appendJsonlSync(jsonlPath, appends.join('\n') + '\n');
         }
-        if (failed.length === 0) { pace = Math.max(1200, pace - 100); break; }
+        if (failed.length === 0) {
+          /* 成功：休息时长回落到基础值 */
+          consecFail = 0;
+          restSec = REST_BASE_SEC;
+          break;
+        }
         if (attempt >= 4) {
           for (const u of failed) errors.push({ uid: u, error: '多次重试失败' });
           log(`      （${failed.length} 个会员多次重试仍失败，已跳过；稍后可整体重跑补抓）`);
           break;
         }
-        await waitLong(60, `本批有 ${failed.length} 个会员取数失败（第 ${attempt} 次）`);
+        /* 整批全失败通常是服务端风控/登录失效的信号：先立刻自检登录态，避免在已触发风控时继续加压 */
+        if (failed.length === batch.length) {
+          consecFail++;
+          restSec = Math.min(REST_MAX_SEC, backoffSeconds(consecFail, REST_BASE_SEC, REST_MAX_SEC));
+          log(`      [重要] 整批 ${failed.length} 个会员全部失败，疑似触发服务端风控（${limiter.usage()}）`);
+          try {
+            const okEarly = await cdp.evaluate('(function(){ try { return !!((localStorage.getItem("code")||"").length); } catch(e){ return true; } })()', 5000);
+            if (okEarly === false) {
+              log('      登录状态已失效，立即停止（已抓取的数据均已保存，重新登录后重跑会自动续传）。');
+              stopAll = true;
+              break;
+            }
+          } catch (e) { /* 自检失败不阻断，继续退避重试 */ }
+        }
+        const waitSec = backoffSeconds(attempt, FAIL_BASE_SEC, FAIL_MAX_SEC);
+        await waitLong(waitSec, `本批有 ${failed.length} 个会员取数失败（第 ${attempt} 次，退避 ${waitSec} 秒）`);
         batch = batch.filter((m) => failed.indexOf(m.uid) >= 0);
         if (!batch.length) break;
         /* 长等待后再自检一次登录状态 */
@@ -653,7 +722,7 @@ async function main() {
         log('      [提示] 已连续 30 分钟没有成功取回数据，自动停止（数据已保存，稍后可重跑续传）。');
         break;
       }
-      await sleep(pace);
+      /* 相邻批次节奏由统一限速器（limiter）控制，此处不再额外 sleep */
     }
 
     // 汇总详情：本次抓取结果（jsonl） + 未变更会员的既有缓存

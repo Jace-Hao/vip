@@ -11,21 +11,52 @@
  * 用法：node fetch_orders.mjs --uid=25190368 [--out=目录] [--no-html]
  *       node fetch_orders.mjs --sample=50   （批量抽样：均匀抽取 N 个有订单的会员）
  *       node fetch_orders.mjs --all         （全量：所有有订单的会员）
+ *       [--min-interval=1500] [--jitter=700]
+ *
+ * 限速（重要）：
+ *   洗衣管家服务端有风控，短时间大量请求会导致接口「冷却」甚至直接踢掉登录账号。
+ *   所有接口调用统一在 callApi() 内经 app/rate_limit.mjs 限速，参数可用命令行或环境变量覆盖：
+ *     --min-interval=<毫秒>   相邻请求最小间隔（默认 1500）
+ *     --jitter=<毫秒>         额外随机抖动上限（默认 700）
+ *     LAUNDRY_MIN_INTERVAL_MS / LAUNDRY_JITTER_MS
+ *   夜间慢速跑示例：
+ *     set LAUNDRY_MIN_INTERVAL_MS=4000 & node fetch_orders.mjs --all
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { RateLimiter, pickNum, backoffSeconds } from './rate_limit.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const CDP_BASE = 'http://127.0.0.1:9222';
+const ARGV = process.argv.slice(2);
+
+/* ---------------- 限速配置（防止触发服务端风控被踢下线） ---------------- */
+const MIN_INTERVAL_MS = pickNum({ argv: ARGV, arg: 'min-interval', env: 'LAUNDRY_MIN_INTERVAL_MS', def: 1500 });
+const JITTER_MS = pickNum({ argv: ARGV, arg: 'jitter', env: 'LAUNDRY_JITTER_MS', def: 700 });
+/* 每完成 REST_EVERY 个会员长休息一次，连续失败时指数退避 */
+const REST_EVERY = pickNum({ argv: ARGV, arg: 'rest-every', env: 'LAUNDRY_ORDER_REST_EVERY', def: 10 });
+const REST_BASE_SEC = pickNum({ argv: ARGV, arg: 'rest-sec', env: 'LAUNDRY_ORDER_REST_SEC', def: 60 });
+const REST_MAX_SEC = pickNum({ argv: ARGV, arg: 'rest-max', env: 'LAUNDRY_ORDER_REST_MAX', def: 900 });
+/* 单个会员整体失败后的等待：60 → 120 → 240 … 秒 */
+const FAIL_BASE_SEC = pickNum({ argv: ARGV, arg: 'fail-sec', env: 'LAUNDRY_ORDER_FAIL_SEC', def: 60 });
+const FAIL_MAX_SEC = pickNum({ argv: ARGV, arg: 'fail-max', env: 'LAUNDRY_ORDER_FAIL_MAX', def: 600 });
+
+/** 全局限速器：所有对洗衣管家的接口调用都必须先 acquire() */
+const limiter = new RateLimiter({
+  name: '订单抓取',
+  minIntervalMs: MIN_INTERVAL_MS,
+  jitterMs: JITTER_MS,
+  log: (line) => console.log(line),
+});
 
 let UID = '';
 let SAMPLE = 0;
 let OUT_DIR = path.join(ROOT, '导出结果', '订单数据');
 let MAKE_HTML = true;
-for (const a of process.argv.slice(2)) {
+for (const a of ARGV) {
   if (a.startsWith('--uid=')) UID = String(a.slice('--uid='.length)).trim();
   else if (a.startsWith('--sample=')) SAMPLE = Math.max(1, parseInt(a.slice('--sample='.length), 10) || 0);
   else if (a === '--all') SAMPLE = 1000000000;
@@ -81,9 +112,9 @@ function appendJsonlSync(filePath, content) {
   try { const fd = fs.openSync(filePath, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); } catch (e) { /* fsync 失败不阻塞 */ }
 }
 
-/* 订单列表签名 */
-function listSig(rows) {
-  const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, r.gtime, r.pctime]);
+/* 订单列表签名（含架号） */
+function listSig(rows, rackMap) {
+  const mini = rows.map((r) => [r.orderid, r.wstatus, r.trmb, r.ctime, (rackMap && rackMap.get(String(r.orderid))) || '', r.gtime, r.pctime]);
   return createHash('md5').update(JSON.stringify(mini)).digest('hex');
 }
 
@@ -152,6 +183,8 @@ function callExpr(params, tmo) {
   })`;
 }
 async function callApi(cdp, params, tmo = 20000) {
+  /* 统一入口限速：所有接口调用（searchwashorders / getorderdetail / getposcodenew）都在此排队 */
+  await limiter.acquire();
   const raw = await cdp.evaluate(callExpr(params, tmo), tmo + 15000);
   if (typeof raw !== 'string') throw new Error('页面返回异常');
   const parsed = JSON.parse(raw);
@@ -195,8 +228,12 @@ async function fetchOrderList(cdp, m) {
   return orders;
 }
 
-async function fetchMemberOrders(cdp, m) {
+async function fetchMemberOrders(cdp, m, rackMap) {
   const orders = await fetchOrderList(cdp, m);
+  /* 注入架号 */
+  if (rackMap && rackMap.size) {
+    for (const o of orders) { const pc = rackMap.get(String(o.orderid)) || o.poscode || ''; if (pc) o.poscode = pc; }
+  }
   const details = [];
   const failedRows = [];
   const uid = m.name || m.uid;
@@ -210,12 +247,13 @@ async function fetchMemberOrders(cdp, m) {
       /* 超时/失败不重试，记录后统一进入休息 */
     }
     if (!ok) failedRows.push(row);
-    await sleep(300);
+    /* 相邻订单详情的间隔由统一限速器（limiter，最小间隔 + 抖动）保证，此处不再单独 sleep */
   }
-  /* 失败的订单：暂停 60 秒后统一补抓一轮 */
+  /* 失败的订单：暂停后统一补抓一轮（等待时长随失败规模放大，避免在已触发风控时继续加压） */
   if (failedRows.length) {
-    console.log(`  ${uid}：${failedRows.length} 笔订单取数失败，暂停 60 秒后统一补抓...`);
-    await sleep(60000);
+    const redoWait = Math.min(FAIL_MAX_SEC, Math.max(FAIL_BASE_SEC, failedRows.length * 10));
+    console.log(`  ${uid}：${failedRows.length} 笔订单取数失败，暂停 ${redoWait} 秒后统一补抓...`);
+    await sleep(redoWait * 1000);
     const still = [];
     for (const row of failedRows) {
       let ok = false;
@@ -227,9 +265,9 @@ async function fetchMemberOrders(cdp, m) {
       if (!ok) still.push(row);
     }
     if (still.length) console.log(`  ${uid}：仍有 ${still.length} 笔订单失败（已跳过，后续运行会自动补抓）`);
-    return { orders: details, failedOrders: still.length, complete: still.length === 0, listSig: listSig(orders) };
+    return { orders: details, failedOrders: still.length, complete: still.length === 0, listSig: listSig(orders, rackMap) };
   }
-  return { orders: details, failedOrders: 0, complete: true, listSig: listSig(orders) };
+  return { orders: details, failedOrders: 0, complete: true, listSig: listSig(orders, rackMap) };
 }
 
 async function runBatch(cdp, sample) {
@@ -261,7 +299,21 @@ async function runBatch(cdp, sample) {
       }
     }
   }
-  /* 增量比对 */
+  // 恢复架号索引
+  let rackMap = new Map();
+  try {
+    const posResult = await callApi(cdp, { act: 'getposcodenew' }, 25000);
+    if (posResult && posResult.data) {
+      for (const item of posResult.data) {
+        if (item && item.orderid) rackMap.set(String(item.orderid), item.poscode || '');
+      }
+    }
+    console.log(`      架号索引：已加载 ${rackMap.size} 条`);
+  } catch (e) {
+    console.log(`      架号索引加载失败：${e.message}（不影响抓取）`);
+  }
+
+  /* 增量比对：纯 memberSig 判断，不调用 fetchOrderList 预检 */
   const todo = [];
   let skipN = 0, newN = 0, chgN = 0, redoN = 0;
   for (const m of picked) {
@@ -269,25 +321,18 @@ async function runBatch(cdp, sample) {
     if (doneUids.has(u) && incompleteUids.has(u)) { redoN++; todo.push(m); continue; }
     if (!doneUids.has(u)) { newN++; todo.push(m); continue; }
     if (sigMap.get(u) !== memberSig(m)) { chgN++; todo.push(m); continue; }
-    try {
-      const rows = await fetchOrderList(cdp, m);
-      const lsig = listSig(rows);
-      m.__lsig = lsig;
-      const last = lastRowMap.get(u);
-      if (last && last.listSig === lsig) { skipN++; continue; }
-      chgN++; todo.push(m);
-    } catch (e) {
-      console.log(`      [提示] ${m.name || u} 订单列表取数失败（${e.message}），保守重抓`);
-      await sleep(800);
-      chgN++; todo.push(m);
-    }
+    // memberSig 一致，直接跳过
+    skipN++;
   }
   const mode = picked.length >= members.length ? '全量' : '抽样';
   console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对：内容一致跳过 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、内容有变化 ${chgN}、补抓失败 ${redoN}）`);
   console.log('');  console.log('');
 
+  console.log(`  限速设置：最小间隔 ${MIN_INTERVAL_MS}ms + 抖动 0~${JITTER_MS}ms`);
+  console.log(`  初始状态：${limiter.usage()}`);
   const t0 = Date.now();
   let okCount = 0, failCount = 0, orderTotal = 0, consecutiveFail = 0, doneSinceRest = 0;
+  let restSec = REST_BASE_SEC; /* 长休息时长，连续失败时指数退避，成功后回落 */
   for (let i = 0; i < todo.length; i++) {
     const m = todo[i];
     const uid = String(m.uid);
@@ -297,27 +342,30 @@ async function runBatch(cdp, sample) {
     } catch (e) { /* ignore */ }
     const mStart = Date.now();
     let result = null, lastErr = null;
-    try { result = await fetchMemberOrders(cdp, m); }
+    try { result = await fetchMemberOrders(cdp, m, rackMap); }
     catch (e) {
       lastErr = e;
-      await waitLong(60, `${m.name || uid} 抓取失败（${e.message}），按规则暂停 60 秒`);
+      const waitSec = backoffSeconds(consecutiveFail + 1, FAIL_BASE_SEC, FAIL_MAX_SEC);
+      await waitLong(waitSec, `${m.name || uid} 抓取失败（${e.message}），指数退避暂停 ${waitSec} 秒`);
     }
     if (!result) {
       failCount++; consecutiveFail++;
+      /* 连续失败：抬高长休息时长（指数退避），避免在已触发风控时继续加压 */
+      restSec = Math.min(REST_MAX_SEC, backoffSeconds(consecutiveFail, REST_BASE_SEC, REST_MAX_SEC));
       console.log(`  [${i + 1}/${todo.length}] ${m.name || uid} 抓取失败：${(lastErr && lastErr.message) || ''}`);
       if (consecutiveFail >= 4) { console.log('  连续失败过多，提前停止（稍后重跑可续传）。'); break; }
       continue;
     }
-    consecutiveFail = 0; okCount++; orderTotal += result.orders.length;
+    consecutiveFail = 0; restSec = REST_BASE_SEC; okCount++; orderTotal += result.orders.length;
     const mSec = Math.round((Date.now() - mStart) / 1000);
-    const lsig = (result.listSig != null) ? result.listSig : ((typeof m.__lsig === 'string') ? m.__lsig : '');
+    const lsig = (result.listSig != null) ? result.listSig : '';
     appendJsonlSync(jsonlPath, JSON.stringify({ uid: m.uid, name: m.name || '', phone: m.phone || '', sig: memberSig(m), listSig: lsig, fetchedAt: new Date().toISOString(), orderCount: result.orders.length, failedOrders: result.failedOrders, complete: result.complete, orders: result.orders }) + '\n');
     console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
     await sleep(400);
     doneSinceRest++;
-    if (doneSinceRest >= 10 && i < todo.length - 1) {
+    if (doneSinceRest >= REST_EVERY && i < todo.length - 1) {
       doneSinceRest = 0;
-      await waitLong(60, '已连续抓取 10 人，休息 60 秒后继续');
+      await waitLong(restSec, `已连续抓取 ${REST_EVERY} 人，休息 ${restSec} 秒后继续（${limiter.usage()}）`);
     }
   }
 
