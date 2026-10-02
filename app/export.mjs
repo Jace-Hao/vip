@@ -30,6 +30,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { RateLimiter, pickNum, backoffSeconds } from './rate_limit.mjs';
+import { isTargetGroup, TARGET_GROUP } from './group_filter.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -409,6 +410,7 @@ async function main() {
   const members = [];
   const seen = new Set();
   let dupCount = 0;
+  let excludedCount = 0; /* 非目标组别（非「${TARGET_GROUP}」）被采集层排除的数量 */
   let total = null;
   let start = 0;
   let pageNo = 0;
@@ -425,9 +427,11 @@ async function main() {
       const key = it.uid != null ? String(it.uid) : JSON.stringify(it);
       if (seen.has(key)) { dupCount++; continue; }
       seen.add(key);
+      /* 采集层组别过滤：非目标组别在采集阶段即排除，不进入后续导出/同步 */
+      if (!isTargetGroup(it)) { excludedCount++; continue; }
       members.push(it);
     }
-    log(`        已获取 ${members.length}${total ? ' / ' + total : ''} 条`);
+    log(`        已筛入「${TARGET_GROUP}」${members.length}${total ? ' 条（接口返回共 ' + total + ' 条' : ''}，本页起累计排除非目标组别 ${excludedCount} 条）`);
     if (list.length < PAGE_SIZE) break;
     start += PAGE_SIZE;
     pageNo++;
@@ -524,7 +528,7 @@ async function main() {
     stamp: ts,
   };
 
-  log(`      会员总数：${members.length} 条${dupCount ? `（已去重 ${dupCount} 条）` : ''}`);
+  log(`      会员总数（目标组别「${TARGET_GROUP}」）：${members.length} 条${dupCount ? `（已去重 ${dupCount} 条）` : ''}${excludedCount ? `；本次共排除非目标组别 ${excludedCount} 条` : ''}`);
   log(`      账户余额合计：¥${sumYuan}`);
 
   /* ---- 深度详情（可选） ---- */

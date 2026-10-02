@@ -27,6 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { RateLimiter, pickNum, backoffSeconds } from './rate_limit.mjs';
+import { isTargetGroup, TARGET_GROUP } from './group_filter.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -206,7 +207,10 @@ function loadMembersFromExport() {
   const list = [];
   for (const r of (j.fullRows || [])) {
     const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
-    if (o.uid != null) list.push(o);
+    if (o.uid == null) continue;
+    /* 与导出口径一致：仅保留目标组别（VIP会员），非目标组别不纳入订单抓取范围 */
+    if (!isTargetGroup(o)) continue;
+    list.push(o);
   }
   return list;
 }
