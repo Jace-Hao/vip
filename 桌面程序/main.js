@@ -16,12 +16,12 @@ function portOpen() {
     const s = net.connect(PORT, '127.0.0.1');
     s.on('connect', () => { s.destroy(); resolve(true); });
     s.on('error', () => resolve(false));
-    s.setTimeout(1200, () => { s.destroy(); resolve(false); });
+    s.setTimeout(400, () => { s.destroy(); resolve(false); });
   });
 }
 async function waitServer(ms) {
   const t0 = Date.now();
-  while (Date.now() - t0 < ms) { if (await portOpen()) return true; await new Promise((r) => setTimeout(r, 400)); }
+  while (Date.now() - t0 < ms) { if (await portOpen()) return true; await new Promise((r) => setTimeout(r, 120)); }
   return false;
 }
 function startServer() {

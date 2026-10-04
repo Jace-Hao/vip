@@ -169,9 +169,22 @@ function fmt(n){return (Number(n)||0).toLocaleString('zh-CN');}
 
 var tunTimer=null;
 var asHold=0;   /* 开机自启操作结果的保留截止时间戳（避免被 3 秒轮询覆盖） */
+/* ---------- 轮询节流与首屏优化 ----------
+   1) inFlight 去重：上一次状态请求未回来时不再发起，避免慢响应堆积成请求队列；
+   2) 页面不可见时暂停轮询：Electron 窗口最小化/隐藏后无需每 3 秒打一次接口；
+   3) 失败退避：接口不可达时从 3 秒逐步退避到 15 秒，恢复后立即回到 3 秒；
+   4) 首屏不等待：chips 先渲染「加载中」骨架，由服务端数据替换，避免白屏等待。 */
+var inFlight=false, pollMs=3000, failStreak=0, visBound=false;
 function refresh(){
-  api('/api/hub/status').then(function(r){
-    if(r.code!==200){return;}
+  if(inFlight)return;                       /* 上一次还没回来，跳过本轮 */
+  inFlight=true;
+  return api('/api/hub/status').then(function(r){
+    if(r.code!==200){
+      /* 非 200 也要重新排期，否则轮询会永久停摆（inFlight 释放但没人再调 refresh） */
+      schedulePoll();
+      return;
+    }
+    failStreak=0; pollMs=3000; schedulePoll();
     var s=r.j;
     var chips=[];
     chips.push('<span class="chip'+(s.cdp==='ok'?'':' bad')+'">服务 <b>运行中</b> · 调试端口 '+(s.cdp==='ok'?'<b class="st-ok">正常</b>':'<b class="st-bad">不可用</b>')+'</span>');
@@ -209,7 +222,12 @@ function refresh(){
       document.getElementById('btnExpQuick').disabled=false;
       document.getElementById('btnExpDeep').disabled=false;
     }
-  }).catch(function(){});
+  }).catch(function(){
+    /* 服务不可达：退避重试，避免窗口隐藏/服务重启时空转请求 */
+    failStreak++;
+    pollMs=Math.min(15000,3000*Math.pow(2,failStreak));
+    schedulePoll();
+  }).then(function(){ inFlight=false; });
 }
 /* 注意参数顺序：act(路径, 请求体, 成功提示)。
    原实现的调用点都多传了一个 'POST'（错位到 body），导致请求体被发成字符串 "POST"，
@@ -362,8 +380,33 @@ function waitServiceBack(btn){
 }
 document.getElementById('btnFolder').addEventListener('click',function(){api('/api/open','POST',{what:'folder'});toast('已在资源管理器打开');});
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+/* 自适应轮询：替代原来的固定 setInterval(refresh,3000)。
+   导出进行中时加密到 2 秒保证进度跟手，其余 3 秒；页面隐藏时停表不再打接口。 */
+var pollTimer=null;
+function schedulePoll(){
+  if(pollTimer){clearTimeout(pollTimer);pollTimer=null;}
+  var dyn=pollMs;
+  /* 导出进行中 → 加密轮询（服务端 hubChild 状态已渲染到 expState，直接据此判断） */
+  try{
+    var es=document.getElementById('expState');
+    if(es && es.innerHTML.indexOf('进行中')>=0) dyn=2000;
+  }catch(e){}
+  pollTimer=setTimeout(function(){
+    if(document.hidden){schedulePoll();return;}   /* 隐藏中：仅续期，不发请求 */
+    refresh();
+  },dyn);
+}
+if(!visBound){
+  visBound=true;
+  document.addEventListener('visibilitychange',function(){
+    /* 回到前台立刻补一次刷新，避免看到过期状态 */
+    if(!document.hidden){refresh();}
+  });
+}
+/* 首屏：先渲染骨架，不等接口 */
+document.getElementById('chips').innerHTML='<span class="chip">状态 <b>加载中…</b></span>';
 refresh();
-setInterval(refresh,3000);
+schedulePoll();
 })();
 </script>
 </body>

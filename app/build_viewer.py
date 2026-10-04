@@ -149,11 +149,18 @@ def main():
     order_map = {}
     ord_jsonl_n = 0
     ord_single_n = 0
+    # 与 orders_server.mjs 的 readJsonlStats 完全同口径的计数（按 uid 去重，后写覆盖），
+    # 用于生成服务端统计记忆文件。
+    jsonl_stat_by_uid = {}
+    jsonl_stat_path = ''
     jsonl_candidates = [os.path.join(out_dir, '.orders_results.jsonl'),
                         os.path.join(out_dir, '订单数据', '.orders_results.jsonl')]
     for jsonl_orders in jsonl_candidates:
         if not os.path.exists(jsonl_orders):
             continue
+        # 只对服务端实际读取的那个文件生成记忆（与服务端 JSONL_PATH 保持一致）
+        if not jsonl_stat_path or os.path.getsize(jsonl_orders) > os.path.getsize(jsonl_stat_path):
+            jsonl_stat_path = jsonl_orders
         with open(jsonl_orders, encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -163,6 +170,16 @@ def main():
                     o = json.loads(line)
                 except Exception:
                     continue
+                # 统计口径（与服务端 readJsonlStats 完全一致）：按 uid 去重，
+                # 后写入的行覆盖同 uid 的旧值 —— 与下方 order_map[uid] 覆盖式赋值同源。
+                # 早期实现按行累加，续传重写同一 uid 时会重复计数，使控制中心显示的
+                # 订单数虚高（实测 18241）且与查询页分片（17572）对不上。
+                if o.get('uid') is not None:
+                    jsonl_stat_by_uid[str(o.get('uid'))] = (
+                        int(o.get('orderCount'))
+                        if o.get('orderCount') is not None
+                        else (len(o['orders']) if isinstance(o.get('orders'), list) else 0)
+                    )
                 uid = str(o.get('uid')) if o.get('uid') is not None else ''
                 if uid and isinstance(o.get('orders'), list):
                     order_map[uid] = {
@@ -238,6 +255,54 @@ def main():
     txt = 'window.MEMBER_DATA=' + json.dumps(result, ensure_ascii=False, separators=(',', ':')) + ';'
     with open(out_js, 'w', encoding='utf-8') as f:
         f.write(txt)
+
+    # 会员统计轻量 sidecar（几 KB）：控制中心首屏只需 members/orders/stamp 三个标量，
+    # 原先必须解析 4.93MB 的 data.js 才能拿到会员数，等于让「会员信息」依赖「订单详情」
+    # 这条更重的链路。此文件与 data.js 同源同刻生成，口径完全一致，缺失时服务端会回退旧路径。
+    try:
+        om = result.get('orderMeta') or {}
+        stat = {
+            'members': len(members),
+            'orders': om.get('orders', 0),
+            'covered': om.get('covered', 0),
+            'parts': om.get('parts', 0),
+            'stamp': result.get('exportStamp', ''),
+            'shop': result.get('shop', ''),
+            'generatedAt': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        stat_path = os.path.join(out_dir, '.hub_stat.json')
+        tmp_path = stat_path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fs2:
+            json.dump(stat, fs2, ensure_ascii=False)
+        os.replace(tmp_path, stat_path)   # 原子替换，避免服务端读到写了一半的文件
+    except Exception as e:
+        print('  [警告] 会员统计 sidecar 写入失败（不影响查询页）：', e)
+
+    # 订单 JSONL 统计记忆：服务端 readJsonlStats 首次调用要全量解析 175MB（约 1s），
+    # 会拖慢工具箱首屏。本脚本在生成查询页时已经逐行读过同一个文件，
+    # 因此顺带把 {size, mtimeMs, members, orders, byUid} 落盘，服务端启动即可直接命中，
+    # 无需重复解析。size/mtimeMs 任一不匹配时服务端会自动丢弃重算，不存在脏读。
+    try:
+        if jsonl_stat_path and os.path.exists(jsonl_stat_path):
+            stt = os.stat(jsonl_stat_path)
+            memo = {
+                'size': stt.st_size,
+                'mtimeMs': stt.st_mtime * 1000.0,
+                'members': len(jsonl_stat_by_uid),
+                'orders': sum(jsonl_stat_by_uid.values()),
+                # 逐 uid 的订单数：服务端增量解析时用它覆盖同 uid 旧值，
+                # 避免续传重写导致的重复累加。
+                'byUid': jsonl_stat_by_uid,
+            }
+            memo_dir = os.path.join(root, '.dev')
+            os.makedirs(memo_dir, exist_ok=True)
+            memo_path = os.path.join(memo_dir, '.jsonl_stat.json')
+            memo_tmp = memo_path + '.tmp'
+            with open(memo_tmp, 'w', encoding='utf-8') as fm:
+                json.dump(memo, fm)
+            os.replace(memo_tmp, memo_path)
+    except Exception as e:
+        print('  [警告] 订单统计记忆写入失败（仅影响启动速度）：', e)
 
     print('数据已生成：', out_js)
     print('  会员：%d 人 | 详情：%d 人（其中 JSON %d + 续传记录 %d）' % (len(members), len(details), det_ok, jsonl_add))

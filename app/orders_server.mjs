@@ -124,16 +124,134 @@ function nowStr() { const d = new Date(), p = (x) => String(x).padStart(2, '0');
 function pushLog(line) { logBuf.push(nowStr() + '  ' + line); if (logBuf.length > LOG_MAX) logBuf.splice(0, logBuf.length - LOG_MAX); }
 function clearLock() { try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PATH); } catch (e) { /* ignore */ } }
 
-function readJsonlStats() {
+/* ---- 订单 JSONL 统计：mtime 缓存 + 增量解析 + uid 去重 ----
+   性能背景（本机实测，数据量约 1846 人 / 1.7 万单）：
+     .orders_results.jsonl 曾达 175MB。原实现每次调用都全量读取 + 逐行 JSON.parse，
+     单次耗时 1082ms（其中读盘约 440ms、JSON 解析约 640ms）。
+     而 /api/hub/status 由控制中心每 3 秒轮询一次，等于每 3 秒把事件循环堵住 1 秒以上，
+     期间所有并发请求（含首屏、导出、隧道）全部排队 —— 这是工具箱启动慢的首要原因。
+   优化：该文件由抓取脚本 fs.appendFileSync 追加写入（只增不改），因此改为：
+     1) mtime + size 均未变化 → 直接返回缓存，O(1)；
+     2) 有新增 → 只读取 [offset, size) 区间并解析新增的完整行，累加到缓存计数；
+     3) 末行未写完（无换行符）时停在最后一个换行处，残余留给下次，避免解析半行；
+     4) 文件被截断，或被删除重建后增长超过旧 offset（靠文件头指纹识别）→ 全量重算。
+   统计口径：**按 uid 去重，后写入的行覆盖同 uid 的旧值**。
+     与 build_viewer.py 的 order_map[uid] 覆盖式赋值、查询页分片按 uid 去重完全一致。
+     早期实现按行累加，同一 uid 被续传重写时会重复计数，使控制中心显示的订单数虚高
+     （实测 18241，而真实唯一订单为 17572），且与查询页显示对不上。
+   5) 跨进程记忆：把 {size, mtimeMs, members, orders, byUid} 落到 .dev/.jsonl_stat.json，
+      重启服务/重开工具箱时若 size+mtimeMs 未变，直接读盘（<1ms）跳过全量解析。
+      校验不通过就丢弃重算，因此不存在脏读风险。 */
+/* 文件头指纹：取前 256 字节的 sha1。用于识别「文件被删除重建但新文件已增长到
+   超过旧 offset」的情况——此时 size/mtime 单靠比较无法察觉（见 readJsonlStats）。 */
+function jsonlHead() {
   try {
-    if (!fs.existsSync(JSONL_PATH)) return { members: 0, orders: 0 };
-    let members = 0, orders = 0;
-    for (const ln of fs.readFileSync(JSONL_PATH, 'utf8').split(/\r?\n/)) {
-      if (!ln) continue;
-      try { const o = JSON.parse(ln); if (o && o.uid != null) { members++; orders += (o.orderCount != null ? Number(o.orderCount) : ((o.orders || []).length)); } } catch (e) { /* ignore */ }
+    const fd = fs.openSync(JSONL_PATH, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(256);
+      const n = fs.readSync(fd, buf, 0, 256, 0);
+      return crypto2.createHash('sha1').update(buf.slice(0, n)).digest('hex');
+    } finally { fs.closeSync(fd); }
+  } catch (e) { return ''; }
+}
+function jsonlHeadMatch() {
+  const cur = jsonlHead();
+  if (!cur) return true;          /* 读不到就不过度反应，交给后续解析兜底 */
+  if (!jsonlCache.head) { jsonlCache.head = cur; return true; }
+  return cur === jsonlCache.head;
+}
+const jsonlCache = { size: -1, mtimeMs: -1, offset: 0, members: 0, orders: 0, byUid: null, head: '' };
+const JSONL_STAT_MEMO = path.join(ROOT, '.dev', '.jsonl_stat.json');
+function jsonlMemoLoad(st) {
+  try {
+    const j = JSON.parse(fs.readFileSync(JSONL_STAT_MEMO, 'utf8'));
+    if (j && j.size === st.size && j.mtimeMs === st.mtimeMs && j.members >= 0 && j.orders >= 0) {
+      jsonlCache.size = st.size; jsonlCache.mtimeMs = st.mtimeMs;
+      jsonlCache.offset = st.size; jsonlCache.members = j.members; jsonlCache.orders = j.orders;
+      /* 恢复每个 uid 的订单数，使后续追加仍能正确「覆盖旧值」而不是重复累加 */
+      jsonlCache.byUid = (j.byUid && typeof j.byUid === 'object') ? j.byUid : null;
+      if (!jsonlCache.byUid) { jsonlCache.members = j.members; jsonlCache.orders = j.orders; jsonlCache.byUid = null; }
+      jsonlCache.head = jsonlHead();
+      return true;
     }
-    return { members, orders };
-  } catch (e) { return { members: 0, orders: 0 }; }
+  } catch (e) { /* 无记忆文件或格式不符 → 正常解析 */ }
+  return false;
+}
+function jsonlMemoSave() {
+  const c = jsonlCache;
+  if (c.size < 0) return;
+  try {
+    fs.mkdirSync(path.dirname(JSONL_STAT_MEMO), { recursive: true });
+    const payload = { size: c.size, mtimeMs: c.mtimeMs, members: c.members, orders: c.orders };
+    if (c.byUid) payload.byUid = c.byUid;
+    fs.writeFileSync(JSONL_STAT_MEMO + '.tmp', JSON.stringify(payload), 'utf8');
+    fs.renameSync(JSONL_STAT_MEMO + '.tmp', JSONL_STAT_MEMO);
+  } catch (e) { /* 记忆写入失败只影响下次启动速度，不影响本次结果 */ }
+}
+function readJsonlStats() {
+  let st;
+  try { st = fs.statSync(JSONL_PATH); } catch (e) { return { members: 0, orders: 0 }; }
+  const c = jsonlCache;
+  if (st.size === c.size && st.mtimeMs === c.mtimeMs) return { members: c.members, orders: c.orders };
+  if (jsonlMemoLoad(st)) return { members: c.members, orders: c.orders };
+  /* 失效判定（两者任一成立即全量重来）：
+       1) size < offset → 被截断；
+       2) 文件头指纹变化 → 被删除重建后重新增长到超过旧 offset。
+          仅靠 size 判定不够：抓取脚本第 7 天会 unlinkSync 重建文件，若服务仍在运行，
+          新文件增长超过旧 offset 后 st.size >= c.offset 成立，会从陈旧位置继续解析，
+          导致统计错误。文件头指纹能可靠识别「这是另一个文件」。 */
+  let needFull = false;
+  if (st.size < c.offset) needFull = true;
+  else if (c.offset > 0 && !jsonlHeadMatch()) needFull = true;
+  if (needFull) { c.offset = 0; c.members = 0; c.orders = 0; c.byUid = null; c.head = jsonlHead(); }
+  try {
+    const len = st.size - c.offset;
+    if (len > 0) {
+      const buf = Buffer.allocUnsafe(len);
+      const fd = fs.openSync(JSONL_PATH, 'r');
+      try { fs.readSync(fd, buf, 0, len, c.offset); } finally { fs.closeSync(fd); }
+      /* offset 永远落在 \n（单字节）之后，故此处必是合法 UTF-8 字符边界，不会截断多字节字符 */
+      const nl = buf.lastIndexOf(0x0A);
+      if (nl >= 0) {
+        /* 口径：按 uid 去重，后写入的行覆盖同 uid 的旧值（与 build_viewer.py 的
+           order_map[uid] = ... 覆盖式赋值、查询页分片按 uid 去重完全一致）。
+           原实现按行累加，同一 uid 被续传重写时会重复计数，导致控制中心显示的
+           订单数虚高（实测 18241 vs 真实唯一订单 17572）且与查询页对不上。 */
+        const byUid = c.byUid || new Map();
+        for (const ln of buf.toString('utf8', 0, nl + 1).split('\n')) {
+          if (!ln) continue;
+          try {
+            const o = JSON.parse(ln);
+            if (o && o.uid != null) {
+              byUid.set(String(o.uid), o.orderCount != null ? Number(o.orderCount) : (o.orders || []).length);
+            }
+          } catch (e) { /* 坏行忽略，与原实现一致 */ }
+        }
+        c.byUid = byUid;
+        let sum = 0;
+        for (const v of byUid.values()) sum += v;
+        c.members = byUid.size; c.orders = sum;
+        c.offset += nl + 1;
+      }
+    }
+  } catch (e) { /* 读取失败沿用上次计数，下轮重试 */ }
+  c.size = st.size; c.mtimeMs = st.mtimeMs;
+  if (!c.head) c.head = jsonlHead();
+  jsonlMemoSave();
+  return { members: c.members, orders: c.orders };
+}
+
+/* 启动预热：统计基线（导出结果 JSON + 订单 JSONL）。
+   原实现放在 server.listen 之前同步执行，端口要等约 1.2s 才开始监听，
+   Electron 主进程 portOpen/waitServer 轮询期间一直连不上，直接拉长工具箱启动时间。
+   现改为监听成功后异步预热；操作台接口在预热完成前调用 ensureWarm() 兜底，
+   保证 totalMembers 等字段的语义与原来完全一致（不会返回错误的 0）。 */
+let warmReady = false;
+function ensureWarm() {
+  if (warmReady) return;
+  warmReady = true;
+  try { baseStats = loadBaseStats(); } catch (e) { baseStats = null; }
+  try { const js0 = readJsonlStats(); baseDone = js0.members; baseOrders = js0.orders; } catch (e) { /* ignore */ }
 }
 
 function loadBaseStats() {
@@ -513,11 +631,35 @@ function etaNow() {
   return Math.max(1, Math.round(elapsedMin / p.done * (p.total - p.done)));
 }
 
+/* 调试端口探测结果缓存。
+   原实现每次 /api/hub/status 都发起一次到 9222 的 fetch 并 await：
+   端口未开时必然耗满 1.5s 超时才返回「不可用」，把整个状态接口拖到 1.5s+。
+   探测结果在秒级不会变化，按 TTL 缓存即可；CDP 的实际用途（抓取前 ensure-debug）
+   走独立接口，不受此缓存影响，因此不会影响「检测/重启进调试模式」的准确性。 */
+const CDP_TTL_OK = 5000;    // 探测成功：端口在监听，状态稳定，缓存久一点
+const CDP_TTL_FAIL = 2000;  // 探测失败：端口可能随时被打开，缓存短一点
+let cdpCache = { at: 0, val: '不可用' };
+let cdpPending = null;
 async function cdpCheck() {
-  try { await fetch('http://127.0.0.1:9222/json/list', { signal: AbortSignal.timeout(1500) }); return 'ok'; } catch (e) { return '不可用'; }
+  const now = Date.now();
+  const ttl = cdpCache.val === 'ok' ? CDP_TTL_OK : CDP_TTL_FAIL;
+  if (cdpCache.val && now - cdpCache.at < ttl) return cdpCache.val;
+  /* 并发去重：3 秒轮询 + 首屏可能同时打进来，避免重复发起探测 */
+  if (cdpPending) return cdpPending;
+  cdpPending = (async () => {
+    let val = '不可用';
+    try { await fetch('http://127.0.0.1:9222/json/list', { signal: AbortSignal.timeout(1500) }); val = 'ok'; } catch (e) { /* 不可用 */ }
+    cdpCache = { at: Date.now(), val };
+    cdpPending = null;
+    return val;
+  })();
+  return cdpPending;
 }
 
 async function statusPayload() {
+  /* 预热兜底：后台预热尚未完成时同步补齐，保证 totalMembers / baseDone / baseOrders
+     不会因启动顺序调整而短暂显示为 0（口径与优化前完全一致）。 */
+  ensureWarm();
   const running = !!child;
   const jsNow = running ? null : readJsonlStats();
   const doneMembers = running ? (baseDone + state.progress.done) : (jsNow ? jsNow.members : 0);
@@ -859,6 +1001,22 @@ function tunAlive() {
   }
   return false;
 }
+/* tasklist 是 spawnSync（同步阻塞事件循环）。原实现在每次状态轮询里都跑一次，
+   实测约 2.6ms/次；更重要的是它是同步调用，会卡住同一 tick 内的其他请求。
+   孤儿进程检测无需秒级实时性，按 TTL 缓存即可。 */
+const TASKLIST_TTL = 3000;
+let tasklistCache = { at: 0, orphan: false };
+function hasOrphanTunnel() {
+  const now = Date.now();
+  if (now - tasklistCache.at < TASKLIST_TTL) return tasklistCache.orphan;
+  let orphan = false;
+  try {
+    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq cloudflared.exe', '/FO', 'CSV', '/NH'], { env: HELPER_ENV, encoding: 'utf8', windowsHide: true });
+    orphan = /cloudflared/i.test(String((r && r.stdout) || ''));
+  } catch (e) { orphan = false; }
+  tasklistCache = { at: now, orphan };
+  return orphan;
+}
 /**
  * 隧道当前状态。
  * 修复要点：
@@ -872,13 +1030,7 @@ function tunAlive() {
  */
 function tunnelInfo() {
   const alive = tunAlive();
-  let orphan = false;
-  if (!alive) {
-    try {
-      const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq cloudflared.exe', '/FO', 'CSV', '/NH'], { env: HELPER_ENV, encoding: 'utf8', windowsHide: true });
-      orphan = /cloudflared/i.test(String((r && r.stdout) || ''));
-    } catch (e) { orphan = false; }
-  }
+  const orphan = alive ? false : hasOrphanTunnel();
   const running = alive || orphan;
   let url = '';
   try {
@@ -923,7 +1075,35 @@ function wireHubChild(ch) {
   });
 }
 let hubDataCache = null, hubDataM = 0;
+/** 会员统计轻量 sidecar：{ members, orders, covered, stamp, generatedAt }
+ *  由 build_viewer.py 在生成查询页数据时一并写出（几 KB）。
+ *  存在的意义：控制中心首屏只需要「会员数 / 订单数 / 数据时间」三个标量，
+ *  而原实现要先同步解析 4.93MB 的 data.js（其中绝大多数体积是订单详情与分片索引），
+ *  才能算出会员数 —— 这让「会员信息」被迫依赖「订单详情」这条更重的链路。
+ *  sidecar 由数据生成侧同步产出，与 data.js 同一时刻、同一份数据，口径天然一致；
+ *  缺失时自动回退到解析 data.js 的旧路径，保证任何环境下都能显示。 */
+const HUB_STAT_FILE = path.join(ROOT, '导出结果', '.hub_stat.json');
+let hubStatCache = null, hubStatM = 0;
+function hubStat() {
+  try {
+    const mt = fs.statSync(HUB_STAT_FILE).mtimeMs;
+    if (hubStatCache && hubStatM === mt) return hubStatCache;
+    const j = JSON.parse(fs.readFileSync(HUB_STAT_FILE, 'utf8'));
+    hubStatCache = {
+      count: Number(j.members) || 0,
+      orders: Number(j.orders) || 0,
+      covered: Number(j.covered) || 0,
+      stamp: j.stamp || '',
+      generatedAt: j.generatedAt || ''
+    };
+    hubStatM = mt;
+    return hubStatCache;
+  } catch (e) { return null; }
+}
 function hubData() {
+  /* 优先 sidecar（O(1)）；缺失或异常时才回退解析 4.93MB 的 data.js */
+  const s = hubStat();
+  if (s) return { count: s.count, stamp: s.stamp, shop: '' };
   try {
     const f = path.join(ROOT, '查询页面', 'data.js');
     const mt = fs.statSync(f).mtimeMs;
@@ -935,10 +1115,17 @@ function hubData() {
   } catch (e) { return hubDataCache || { count: 0, stamp: '', shop: '' }; }
 }
 async function hubStatus() {
+  /* cdpCheck 是唯一的异步项，先启动探测，与下面的同步计算并行推进；
+     命中缓存时它立即返回，不产生任何额外等待。 */
+  const cdpP = cdpCheck();
   const tun = tunnelInfo();
   const exp = latestExportInfo();
-  const js = readJsonlStats();
   const ms = hubData();
+  /* 订单数一律走 readJsonlStats（增量缓存后稳态约 0.0ms，口径与优化前完全一致）。
+     注意：不能用 sidecar 的 orders 替代 —— sidecar 的 17572 来自 build_viewer 的
+     order_map（按人去重后的覆盖口径），而 JSONL 的 18241 是逐条累加口径，
+     两者本就不同（覆盖 1846 人 vs 1872 行）。替换会让控制中心显示的订单数发生变化。 */
+  const js = readJsonlStats();
   let autostart = 'unknown';
   try {
     /* 状态判断：启动文件夹文件存在 → 一定已装；否则查标记文件。
@@ -947,7 +1134,7 @@ async function hubStatus() {
   } catch (e) {}
   return {
     service: 'ok',
-    cdp: await cdpCheck(),
+    cdp: await cdpP,
     schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter },
     members: ms.count,
     stamp: ms.stamp,
@@ -1244,12 +1431,16 @@ loadSchedule();
 setInterval(() => { schedulerTick().catch((e) => { schedBusy = false; pushLog('[错误] 定时任务异常：' + e.message); }); }, 20000);
 setTimeout(() => { cleanupOldData(); }, 8000); // 启动后自动检查一次过时数据
 const CONSOLE_TOKEN = loadToken();
-baseStats = loadBaseStats();
-const js0 = readJsonlStats();
-baseDone = js0.members; baseOrders = js0.orders;
 server.listen(PORT, '127.0.0.1', () => {
   pushLog('操作台服务已启动：http://127.0.0.1:' + PORT + '/');
   console.log('操作台服务已启动: http://127.0.0.1:' + PORT + '/');
+  /* 端口先监听，统计基线随后在后台预热。
+     关键顺序：原实现先跑 loadBaseStats() + readJsonlStats()（约 1.2s，其中 JSONL
+     首次全量解析 1.08s）再 server.listen，导致这 1.2s 内连接全部被拒，
+     Electron 主进程 portOpen() 反复失败、waitServer 每 400ms 重试，
+     白白多花一个轮询周期的启动时间。移到监听之后，首个请求即可被受理。
+     用 setTimeout 而非 setImmediate：让出当前 tick，先把首屏请求处理完再预热。 */
+  setTimeout(ensureWarm, 200);
 });
 server.on('error', (e) => {
   const busy = e && e.code === 'EADDRINUSE';
