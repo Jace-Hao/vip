@@ -21,6 +21,9 @@
  *     LAUNDRY_MIN_INTERVAL_MS / LAUNDRY_JITTER_MS
  *   夜间慢速跑示例：
  *     set LAUNDRY_MIN_INTERVAL_MS=4000 & node fetch_orders.mjs --all
+ *
+ * 节奏：抓取全程不停顿——默认不做周期性长休息（原「每 10 人休息 60 秒」已取消），
+ *   相邻请求间隔是唯一节奏；如需恢复长休息用 --rest-every=10 --rest-sec=60。
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,8 +40,9 @@ const ARGV = process.argv.slice(2);
 /* ---------------- 限速配置（防止触发服务端风控被踢下线） ---------------- */
 const MIN_INTERVAL_MS = pickNum({ argv: ARGV, arg: 'min-interval', env: 'LAUNDRY_MIN_INTERVAL_MS', def: 1500 });
 const JITTER_MS = pickNum({ argv: ARGV, arg: 'jitter', env: 'LAUNDRY_JITTER_MS', def: 700 });
-/* 每完成 REST_EVERY 个会员长休息一次，连续失败时指数退避 */
-const REST_EVERY = pickNum({ argv: ARGV, arg: 'rest-every', env: 'LAUNDRY_ORDER_REST_EVERY', def: 10 });
+/* 每完成 REST_EVERY 个会员长休息一次，连续失败时指数退避；
+   默认 0 = 关闭长休息（全程不停顿，仅按请求间隔限速），--rest-every=10 可显式开启 */
+const REST_EVERY = pickNum({ argv: ARGV, arg: 'rest-every', env: 'LAUNDRY_ORDER_REST_EVERY', def: 0 });
 const REST_BASE_SEC = pickNum({ argv: ARGV, arg: 'rest-sec', env: 'LAUNDRY_ORDER_REST_SEC', def: 60 });
 const REST_MAX_SEC = pickNum({ argv: ARGV, arg: 'rest-max', env: 'LAUNDRY_ORDER_REST_MAX', def: 900 });
 /* 单个会员整体失败后的等待：60 → 120 → 240 … 秒 */
@@ -332,7 +336,7 @@ async function runBatch(cdp, sample) {
   console.log(`  ${mode} ${picked.length} 人（含订单会员共 ${members.length} 人）；数据比对：内容一致跳过 ${skipN} 人，需抓取 ${todo.length} 人（新增 ${newN}、内容有变化 ${chgN}、补抓失败 ${redoN}）`);
   console.log('');  console.log('');
 
-  console.log(`  限速设置：最小间隔 ${MIN_INTERVAL_MS}ms + 抖动 0~${JITTER_MS}ms`);
+  console.log(`  限速设置：最小间隔 ${MIN_INTERVAL_MS}ms + 抖动 0~${JITTER_MS}ms（全程不停顿，仅按请求限速${REST_EVERY > 0 ? `；每 ${REST_EVERY} 人长休息 ${REST_BASE_SEC}s` : ''}）`);
   console.log(`  初始状态：${limiter.usage()}`);
   const t0 = Date.now();
   let okCount = 0, failCount = 0, orderTotal = 0, consecutiveFail = 0, doneSinceRest = 0;
@@ -367,7 +371,7 @@ async function runBatch(cdp, sample) {
     console.log(`  [${i + 1}/${todo.length}] ${m.name || uid}：${result.orders.length} 单抓取完成（${mSec}s${mSec > 90 ? '，较慢' : ''}）`);
     await sleep(400);
     doneSinceRest++;
-    if (doneSinceRest >= REST_EVERY && i < todo.length - 1) {
+    if (REST_EVERY > 0 && doneSinceRest >= REST_EVERY && i < todo.length - 1) {
       doneSinceRest = 0;
       await waitLong(restSec, `已连续抓取 ${REST_EVERY} 人，休息 ${restSec} 秒后继续（${limiter.usage()}）`);
     }
