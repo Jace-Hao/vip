@@ -15,6 +15,9 @@
  *                             mode=daily 每天一次（time 为时刻）；mode=hourly 每小时一次（取 time 的分钟）；
  *                             hourly 模式不支持 shutdownAfter（每小时都关机将打断循环，保存时自动置 false）
  *   POST /api/cancel_shutdown 取消待执行的自动关机
+ *   GET  /api/shutdown_schedule  查询独立定时关机设置 {"enabled":true,"time":"23:30"}
+ *   POST /api/shutdown_schedule  保存独立定时关机设置（与定时同步相互独立：到点直接关机，
+ *                              若当时正在同步/导出则顺延到结束后执行；关机前 2 分钟可取消）
  * ============================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,10 +36,11 @@ const LOCK_PATH = path.join(OUT_DIR, '.orders_run.lock');
 const JSONL_PATH = path.join(OUT_DIR, '.orders_results.jsonl');
 const LOG_MAX = 500;
 const SCHEDULE_FILE = path.join(ROOT, '.sync_schedule.json');
+const SD_SCHEDULE_FILE = path.join(ROOT, '.shutdown_schedule.json'); // 独立定时关机设置
 const TOKEN_FILE = path.join(ROOT, '.console_token.txt');
 const HUB_FILE = path.join(ROOT, '控制中心.html');
 const APP_EXE = 'D:\\Blending_Release-6.1.17\\xygjwinapp.exe';
-const SHUTDOWN_DELAY = 120; // 同步完成后延迟关机秒数（期间可取消）
+const SHUTDOWN_DELAY = 120; // 自动关机倒计时秒数（期间可取消，同步后关机/定时关机共用）
 
 /* ---------------- 营业时段保护 ----------------
  * 抓取会占用洗衣管家账号的请求配额；历史观测该配额约 400 次/小时量级，
@@ -116,7 +120,11 @@ let state = {
   ordersThisRun: 0,
 };
 let schedule = { enabled: false, mode: 'daily', time: '23:00', shutdownAfter: false, lastFiredDate: '', lastFiredHour: '' };
-let shutdownPending = null;    // { since } 自动关机倒计时
+/* 独立定时关机：与定时同步完全解耦，到点直接走关机倒计时（复用同步后关机的取消机制）。
+   存独立文件 .shutdown_schedule.json，改同步安排不会影响它，反之亦然。 */
+let sdSchedule = { enabled: false, time: '23:30', lastFiredDate: '' };
+let sdDeferLogged = false;   // 「定时关机顺延」提示只记一次，避免每 20s 刷屏
+let shutdownPending = null;    // { since, reason } 自动关机倒计时
 let scheduleTriggered = false; // 当前抓取是否由定时同步触发
 let schedBusy = false;
 let lastCleanup = null;  // { at, atText, removed }
@@ -343,6 +351,16 @@ function loadSchedule() {
   } catch (e) { /* ignore */ }
 }
 function saveSchedule() { try { fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedule, null, 2), 'utf8'); } catch (e) { pushLog('[警告] 定时设置保存失败：' + e.message); } }
+/* 独立定时关机：加载/保存。time 必须是 HH:MM；文件缺失或损坏时用默认值（不启用）。 */
+function loadSdSchedule() {
+  try {
+    if (fs.existsSync(SD_SCHEDULE_FILE)) {
+      const j = JSON.parse(fs.readFileSync(SD_SCHEDULE_FILE, 'utf8'));
+      if (j && typeof j === 'object') sdSchedule = { enabled: !!j.enabled, time: /^\d{1,2}:\d{2}$/.test(j.time || '') ? j.time : '23:30', lastFiredDate: j.lastFiredDate || '' };
+    }
+  } catch (e) { /* ignore */ }
+}
+function saveSdSchedule() { try { fs.writeFileSync(SD_SCHEDULE_FILE, JSON.stringify(sdSchedule, null, 2), 'utf8'); } catch (e) { pushLog('[警告] 定时关机设置保存失败：' + e.message); } }
 
 async function cdpOk(timeoutMs) {
   try { await fetch('http://127.0.0.1:9222/json/version', { signal: AbortSignal.timeout(timeoutMs || 2000) }); return true; } catch (e) { return false; }
@@ -394,12 +412,14 @@ async function doEnsureDebugApp() {
 }
 
 
-function doShutdown() {
+/* reason: 'sync' 同步后关机（默认） | 'scheduled' 独立定时关机到点 */
+function doShutdown(reason) {
   if (shutdownPending) return;
-  shutdownPending = { since: Date.now() };
-  pushLog('⚡ 同步完成：系统将在 ' + SHUTDOWN_DELAY + ' 秒后自动关机（可在本页面点「取消关机」）。');
+  shutdownPending = { since: Date.now(), reason: reason || 'sync' };
+  const scheduled = shutdownPending.reason === 'scheduled';
+  pushLog((scheduled ? '⏰ 定时关机时间已到' : '⚡ 同步完成') + '：系统将在 ' + SHUTDOWN_DELAY + ' 秒后自动关机（可在本页面点「取消关机」）。');
   try {
-    const ch = spawn(SHUTDOWN_EXE, ['/s', '/t', String(SHUTDOWN_DELAY), '/c', '订单数据同步完成，系统即将关机'], { stdio: 'ignore', detached: true, env: SHUTDOWN_ENV, windowsHide: true });
+    const ch = spawn(SHUTDOWN_EXE, ['/s', '/t', String(SHUTDOWN_DELAY), '/c', scheduled ? '定时关机时间已到，系统即将关机' : '订单数据同步完成，系统即将关机'], { stdio: 'ignore', detached: true, env: SHUTDOWN_ENV, windowsHide: true });
     ch.on('error', (e) => { pushLog('[错误] 关机命令启动失败：' + e.message); shutdownPending = null; });
     ch.on('exit', (code) => { if (code !== 0) { pushLog('[错误] 关机命令执行失败（代码 ' + code + '），已取消本次自动关机。'); shutdownPending = null; } });
   } catch (e) { pushLog('[错误] 关机命令执行失败：' + e.message); shutdownPending = null; }
@@ -460,6 +480,34 @@ async function schedulerTick() {
     const r = await start(0);
     if (r && r.error) { scheduleTriggered = false; pushLog('定时同步启动失败：' + r.error); }
   } finally { schedBusy = false; }
+}
+
+/* ---------------- 独立定时关机 ----------------
+ * 与定时同步完全解耦：每天到点直接进入关机倒计时（2 分钟，可取消）。
+ * 语义（与定时同步的 daily 模式保持一致）：
+ *   1) 到点后 10 分钟窗口内触发——服务若当时没开（如电脑已关），错过窗口本次跳过，次日再来；
+ *   2) 到点但正在同步/导出/重建：顺延到任务结束后再关（不记 lastFiredDate，下个 tick 继续等）；
+ *   3) 已触发过（lastFiredDate=今天）则今天不再触发；倒计时期间用户点「取消关机」今天也不会再触发。 */
+function shutdownSchedTick() {
+  const s = sdSchedule;
+  if (!s.enabled || shutdownPending) return;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(s.time || '');
+  if (!m) return;
+  const now = new Date();
+  const fire = new Date(now.getFullYear(), now.getMonth(), now.getDate(), +m[1], +m[2], 0);
+  const diff = now - fire;
+  if (diff < 0 || diff > 10 * 60 * 1000) return;   // 未到时间 / 错过超过10分钟（次日再触发）
+  const today = todayStr();
+  if (s.lastFiredDate === today) return;
+  /* 有数据任务在跑：顺延到结束后关机，绝不打断抓取/导出 */
+  if (child || hubChild || rebuilding || schedBusy) {
+    if (!sdDeferLogged) { sdDeferLogged = true; pushLog('⏰ 定时关机时间已到，但当前有数据任务正在运行，将顺延到完成后自动关机。'); }
+    return;
+  }
+  sdDeferLogged = false;
+  s.lastFiredDate = today;
+  saveSdSchedule();
+  doShutdown('scheduled');
 }
 
 /* ---------------- 自动清理过时数据（保留最近 KEEP_RUNS 次） ---------------- */
@@ -720,8 +768,10 @@ async function statusPayload() {
     cdp: await cdpCheck(),
     rebuilding,
     schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate },
+    shutdownSchedule: { enabled: sdSchedule.enabled, time: sdSchedule.time, lastFiredDate: sdSchedule.lastFiredDate },
     lastCleanup,
     shutdownPendingSecs: shutdownPending ? Math.max(0, SHUTDOWN_DELAY - Math.round((Date.now() - shutdownPending.since) / 1000)) : 0,
+    shutdownPendingReason: shutdownPending ? (shutdownPending.reason || 'sync') : '',
     serverPort: PORT,
     logTail: logBuf.slice(-25),
   };
@@ -1170,6 +1220,7 @@ async function hubStatus() {
     service: 'ok',
     cdp: await cdpP,
     schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter },
+    sdSchedule: { enabled: sdSchedule.enabled, time: sdSchedule.time },
     members: ms.count,
     stamp: ms.stamp,
     orders: js,
@@ -1275,6 +1326,18 @@ const server = http.createServer(async (req, res) => {
             : ('每天 ' + schedule.time + (schedule.shutdownAfter ? '，同步后自动关机' : '')))
         : '已停用'));
       sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } });
+      return;
+    }
+    if (req.method === 'GET' && p === '/api/shutdown_schedule') { sendJson(res, { ok: true, shutdown: { enabled: sdSchedule.enabled, time: sdSchedule.time, lastFiredDate: sdSchedule.lastFiredDate } }); return; }
+    if (req.method === 'POST' && p === '/api/shutdown_schedule') {
+      const body = await readBody(req);
+      const t = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(String(body.time || ''));
+      if (!t || +t[1] > 23 || +t[2] > 59) { sendJson(res, { error: '时间格式应为 HH:MM（如 23:30）' }, 400); return; }
+      sdSchedule.enabled = !!body.enabled;
+      sdSchedule.time = String(+t[1]).padStart(2, '0') + ':' + t[2];
+      saveSdSchedule();
+      pushLog('定时关机设置已保存：' + (sdSchedule.enabled ? ('每天 ' + sdSchedule.time + ' 自动关机') : '已停用'));
+      sendJson(res, { ok: true, shutdown: { enabled: sdSchedule.enabled, time: sdSchedule.time, lastFiredDate: sdSchedule.lastFiredDate } });
       return;
     }
     if (req.method === 'POST' && p === '/api/cancel_shutdown') { sendJson(res, cancelShutdown()); return; }
@@ -1469,7 +1532,12 @@ const server = http.createServer(async (req, res) => {
 
 /* ---------------- 启动 ---------------- */
 loadSchedule();
-setInterval(() => { schedulerTick().catch((e) => { schedBusy = false; pushLog('[错误] 定时任务异常：' + e.message); }); }, 20000);
+loadSdSchedule();
+setInterval(() => {
+  /* 独立定时关机与定时同步解耦：即使没开定时同步，定时关机也生效 */
+  try { shutdownSchedTick(); } catch (e) { pushLog('[错误] 定时关机检查异常：' + e.message); }
+  schedulerTick().catch((e) => { schedBusy = false; pushLog('[错误] 定时任务异常：' + e.message); });
+}, 20000);
 setTimeout(() => { cleanupOldData(); }, 8000); // 启动后自动检查一次过时数据
 const CONSOLE_TOKEN = loadToken();
 server.listen(PORT, '127.0.0.1', () => {

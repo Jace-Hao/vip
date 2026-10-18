@@ -6,6 +6,7 @@
 __pycache__/
 *.pyc
 .sync_schedule.json
+.shutdown_schedule.json
 .console_token.txt
 app/cloudflared.exe
 Python/
@@ -13,3 +14,6 @@ Python/
 桌面程序/dist/
 洗衣管家工具箱.exe
 .workbuddy/
+
+# 微信AI助手运行时数据（含服务号密钥/客户绑定/对话记录）
+微信AI助手/data/

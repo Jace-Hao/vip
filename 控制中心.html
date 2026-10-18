@@ -193,6 +193,7 @@ function refresh(){
     chips.push(s.schedule.enabled
       ?'<span class="chip">定时 <b>每天 '+s.schedule.time+'</b>'+(s.schedule.shutdownAfter?' · 同步后关机':'')+'</span>'
       :'<span class="chip">定时 <b>未启用</b></span>');
+    if(s.sdSchedule && s.sdSchedule.enabled)chips.push('<span class="chip">定时关机 <b>每天 '+s.sdSchedule.time+'</b></span>');
     chips.push(s.autostart==='installed'?'<span class="chip ok">开机自启 <b>已安装</b></span>':'<span class="chip">开机自启 <b>未安装</b></span>');
     chips.push(s.tunnel.running?(s.tunnel.url?'<span class="chip ok">隧道 <b>开启</b></span>':'<span class="chip">隧道 <b>启动中</b></span>'):'<span class="chip">隧道 <b>关闭</b></span>');
     document.getElementById('chips').innerHTML=chips.join('');
