@@ -1,7 +1,7 @@
 {
   "name": "xqy-toolbox-desktop",
   "productName": "洗衣管家工具箱",
-  "version": "1.0.0",
+  "version": "1.16.0",
   "main": "main.js",
   "author": "xqy",
   "scripts": {
