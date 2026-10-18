@@ -143,7 +143,10 @@ function clearLock() { try { if (fs.existsSync(LOCK_PATH)) fs.unlinkSync(LOCK_PA
      （实测 18241，而真实唯一订单为 17572），且与查询页显示对不上。
    5) 跨进程记忆：把 {size, mtimeMs, members, orders, byUid} 落到 .dev/.jsonl_stat.json，
       重启服务/重开工具箱时若 size+mtimeMs 未变，直接读盘（<1ms）跳过全量解析。
-      校验不通过就丢弃重算，因此不存在脏读风险。 */
+      校验不通过就丢弃重算，因此不存在脏读风险。
+ *      byUid 内存里是 Map、落盘是普通对象（JSON 不支持 Map），加载/保存都必须显式转换，
+ *      且加载时校验 byUid 与 members/orders 自洽，否则宁可全量重算——
+ *      曾因漏了转换导致重启后统计冻结在旧值（详见 jsonlMemoLoad 内注释）。 */
 /* 文件头指纹：取前 256 字节的 sha1。用于识别「文件被删除重建但新文件已增长到
    超过旧 offset」的情况——此时 size/mtime 单靠比较无法察觉（见 readJsonlStats）。 */
 function jsonlHead() {
@@ -168,11 +171,22 @@ function jsonlMemoLoad(st) {
   try {
     const j = JSON.parse(fs.readFileSync(JSONL_STAT_MEMO, 'utf8'));
     if (j && j.size === st.size && j.mtimeMs === st.mtimeMs && j.members >= 0 && j.orders >= 0) {
+      /* byUid 落盘时是普通 JSON 对象，必须转成 Map 才能继续 .set() 增量覆盖。
+         早期原样加载，readJsonlStats 对普通对象调 .set() 抛 TypeError 被 catch 吞掉，
+         重启后统计永久冻结在记忆值（实测冻结在 1884/18092，文件实际已增长到 1908/18389）。
+         另外 byUid 缺失/为空/与 members、orders 不自洽时，增量解析无法覆盖同 uid 旧值，
+         会把计数重算成「只有新增 uid」导致越跑越少——这种记忆宁可丢弃，走全量解析
+         （约 1s）保证口径正确。 */
+      const raw = j.byUid;
+      const keys = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? Object.keys(raw) : [];
+      if (keys.length !== j.members) return false;
+      let sum = 0;
+      for (const k of keys) sum += Number(raw[k]) || 0;
+      if (sum !== j.orders) return false;
+      const byUid = new Map(keys.map((k) => [k, Number(raw[k]) || 0]));
       jsonlCache.size = st.size; jsonlCache.mtimeMs = st.mtimeMs;
       jsonlCache.offset = st.size; jsonlCache.members = j.members; jsonlCache.orders = j.orders;
-      /* 恢复每个 uid 的订单数，使后续追加仍能正确「覆盖旧值」而不是重复累加 */
-      jsonlCache.byUid = (j.byUid && typeof j.byUid === 'object') ? j.byUid : null;
-      if (!jsonlCache.byUid) { jsonlCache.members = j.members; jsonlCache.orders = j.orders; jsonlCache.byUid = null; }
+      jsonlCache.byUid = byUid;
       jsonlCache.head = jsonlHead();
       return true;
     }
@@ -185,7 +199,10 @@ function jsonlMemoSave() {
   try {
     fs.mkdirSync(path.dirname(JSONL_STAT_MEMO), { recursive: true });
     const payload = { size: c.size, mtimeMs: c.mtimeMs, members: c.members, orders: c.orders };
-    if (c.byUid) payload.byUid = c.byUid;
+    /* byUid 内存里是 Map，JSON 不支持 Map：必须显式转成普通对象再落盘。
+       早期直接 JSON.stringify(Map) 会静默写成 {}，把逐 uid 计数全部丢掉，
+       下次启动加载后 byUid 为空 → 计数崩成「只有新增 uid」或被判记忆失效全量重算。 */
+    if (c.byUid) payload.byUid = c.byUid instanceof Map ? Object.fromEntries(c.byUid) : c.byUid;
     fs.writeFileSync(JSONL_STAT_MEMO + '.tmp', JSON.stringify(payload), 'utf8');
     fs.renameSync(JSONL_STAT_MEMO + '.tmp', JSONL_STAT_MEMO);
   } catch (e) { /* 记忆写入失败只影响下次启动速度，不影响本次结果 */ }
@@ -219,7 +236,7 @@ function readJsonlStats() {
            order_map[uid] = ... 覆盖式赋值、查询页分片按 uid 去重完全一致）。
            原实现按行累加，同一 uid 被续传重写时会重复计数，导致控制中心显示的
            订单数虚高（实测 18241 vs 真实唯一订单 17572）且与查询页对不上。 */
-        const byUid = c.byUid || new Map();
+        const byUid = c.byUid instanceof Map ? c.byUid : new Map();
         for (const ln of buf.toString('utf8', 0, nl + 1).split('\n')) {
           if (!ln) continue;
           try {
