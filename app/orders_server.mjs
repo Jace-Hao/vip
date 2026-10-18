@@ -11,7 +11,9 @@
  *   POST /api/rebuild 刷新查询页面数据
  *   POST /api/open    打开查询页面 / 数据文件夹
  *   GET  /api/schedule        查询定时同步设置
- *   POST /api/schedule        保存定时同步设置 {"enabled":true,"time":"23:00","shutdownAfter":true}
+ *   POST /api/schedule        保存定时同步设置 {"enabled":true,"mode":"daily|hourly","time":"23:00","shutdownAfter":true}
+ *                             mode=daily 每天一次（time 为时刻）；mode=hourly 每小时一次（取 time 的分钟）；
+ *                             hourly 模式不支持 shutdownAfter（每小时都关机将打断循环，保存时自动置 false）
  *   POST /api/cancel_shutdown 取消待执行的自动关机
  * ============================================================ */
 import fs from 'node:fs';
@@ -113,7 +115,7 @@ let state = {
   totalWithOrders: null,
   ordersThisRun: 0,
 };
-let schedule = { enabled: false, time: '23:00', shutdownAfter: false, lastFiredDate: '' };
+let schedule = { enabled: false, mode: 'daily', time: '23:00', shutdownAfter: false, lastFiredDate: '', lastFiredHour: '' };
 let shutdownPending = null;    // { since } 自动关机倒计时
 let scheduleTriggered = false; // 当前抓取是否由定时同步触发
 let schedBusy = false;
@@ -319,7 +321,7 @@ function loadSchedule() {
   try {
     if (fs.existsSync(SCHEDULE_FILE)) {
       const j = JSON.parse(fs.readFileSync(SCHEDULE_FILE, 'utf8'));
-      if (j && typeof j === 'object') schedule = { enabled: !!j.enabled, time: /^\d{1,2}:\d{2}$/.test(j.time || '') ? j.time : '23:00', shutdownAfter: !!j.shutdownAfter, lastFiredDate: j.lastFiredDate || '' };
+      if (j && typeof j === 'object') schedule = { enabled: !!j.enabled, mode: (j.mode === 'hourly' ? 'hourly' : 'daily'), time: /^\d{1,2}:\d{2}$/.test(j.time || '') ? j.time : '23:00', shutdownAfter: !!j.shutdownAfter, lastFiredDate: j.lastFiredDate || '', lastFiredHour: j.lastFiredHour || '' };
     }
   } catch (e) { /* ignore */ }
 }
@@ -400,14 +402,28 @@ async function schedulerTick() {
   const m = /^(\d{1,2}):(\d{2})$/.exec(schedule.time || '');
   if (!m) return;
   const now = new Date();
-  const fire = new Date(now.getFullYear(), now.getMonth(), now.getDate(), +m[1], +m[2], 0);
-  const diff = now - fire;
-  if (diff < 0 || diff > 10 * 60 * 1000) return; // 未到时间 / 错过超过10分钟（次日再触发）
-  const today = todayStr();
-  if (schedule.lastFiredDate === today) return;
-  schedule.lastFiredDate = today; saveSchedule();
+  let desc;
+  if (schedule.mode === 'hourly') {
+    /* 每小时模式：每到「第 MM 分」触发一次，本小时已触发过则跳过。
+       上次同步没跑完时顺延——tick 因 child 占用直接 return、不记 lastFiredHour，
+       跑完后的第一个 tick 即补触发本小时剩余窗口；跨小时则顺延到下一个整点。 */
+    if (now.getMinutes() < +m[2]) return;
+    const hourKey = todayStr() + 'T' + String(now.getHours()).padStart(2, '0');
+    if (schedule.lastFiredHour === hourKey) return;
+    schedule.lastFiredHour = hourKey;
+    desc = '每小时（第 ' + m[2] + ' 分）';
+  } else {
+    const fire = new Date(now.getFullYear(), now.getMonth(), now.getDate(), +m[1], +m[2], 0);
+    const diff = now - fire;
+    if (diff < 0 || diff > 10 * 60 * 1000) return; // 未到时间 / 错过超过10分钟（次日再触发）
+    const today = todayStr();
+    if (schedule.lastFiredDate === today) return;
+    schedule.lastFiredDate = today;
+    desc = '每天 ' + schedule.time;
+  }
+  saveSchedule();
   schedBusy = true;
-  pushLog('⏰ 定时同步触发（每天 ' + schedule.time + (schedule.shutdownAfter ? ' · 同步后自动关机' : '') + '）');
+  pushLog('⏰ 定时同步触发（' + desc + (schedule.mode === 'daily' && schedule.shutdownAfter ? ' · 同步后自动关机' : '') + '）');
   try {
     if (BUSINESS_GUARD_BLOCK && inBusinessHours()) {
       pushLog('营业时段保护已开启：当前处于营业时段，本次定时同步跳过（建议把定时时间改到 22:00 之后）。');
@@ -553,7 +569,8 @@ function spawnPhase(kind) {
       lastExit = { kind: 'orders', code };
       pushLog(code === 0 ? '订单抓取完成。' : ('订单抓取进程退出（代码 ' + code + '）'));
       clearLock();
-      const wantShutdown = schedule.shutdownAfter; /* 勾选“同步后关机”即生效（手动/定时均适用） */
+      /* 勾选“同步后关机”即生效（手动/定时均适用）；每小时模式不支持——每小时都关机会打断同步循环 */
+      const wantShutdown = schedule.shutdownAfter && schedule.mode !== 'hourly';
       scheduleTriggered = false;
       cleanupOldData().then(() => {
         const r2 = rebuild(wantShutdown);
@@ -586,7 +603,7 @@ async function start(sample) {
   clearLock();
   startedAt = new Date().toISOString();
   spawnPhase('deep');
-  if (schedule.shutdownAfter) pushLog('⚡ 已开启「同步后关机」：本次同步完成后约 ' + SHUTDOWN_DELAY + ' 秒自动关机（完成前可随时取消）。');
+  if (schedule.shutdownAfter && schedule.mode !== 'hourly') pushLog('⚡ 已开启「同步后关机」：本次同步完成后约 ' + SHUTDOWN_DELAY + ' 秒自动关机（完成前可随时取消）。');
   return { ok: true, sample: sample > 0 ? sample : 'all' };
 }
 
@@ -685,7 +702,7 @@ async function statusPayload() {
     },
     cdp: await cdpCheck(),
     rebuilding,
-    schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate },
+    schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate },
     lastCleanup,
     shutdownPendingSecs: shutdownPending ? Math.max(0, SHUTDOWN_DELAY - Math.round((Date.now() - shutdownPending.since) / 1000)) : 0,
     serverPort: PORT,
@@ -1135,7 +1152,7 @@ async function hubStatus() {
   return {
     service: 'ok',
     cdp: await cdpP,
-    schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter },
+    schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter },
     members: ms.count,
     stamp: ms.stamp,
     orders: js,
@@ -1223,17 +1240,24 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'POST' && p === '/api/stop') { const r = stop(); sendJson(res, r, r.ok ? 200 : 409); return; }
-    if (req.method === 'GET' && p === '/api/schedule') { sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } }); return; }
+    if (req.method === 'GET' && p === '/api/schedule') { sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } }); return; }
     if (req.method === 'POST' && p === '/api/schedule') {
       const body = await readBody(req);
       const t = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(String(body.time || ''));
       if (!t || +t[1] > 23 || +t[2] > 59) { sendJson(res, { error: '时间格式应为 HH:MM（如 23:00）' }, 400); return; }
+      const mode = body.mode === 'hourly' ? 'hourly' : 'daily';
       schedule.enabled = !!body.enabled;
+      schedule.mode = mode;
       schedule.time = String(+t[1]).padStart(2, '0') + ':' + t[2];
-      schedule.shutdownAfter = !!body.shutdownAfter;
+      /* 每小时模式不提供「同步后自动关机」：每小时都关机将打断每小时同步循环，直接置灰忽略 */
+      schedule.shutdownAfter = mode === 'hourly' ? false : !!body.shutdownAfter;
       saveSchedule();
-      pushLog('定时同步设置已保存：' + (schedule.enabled ? ('每天 ' + schedule.time + (schedule.shutdownAfter ? '，同步后自动关机' : '')) : '已停用'));
-      sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } });
+      pushLog('定时同步设置已保存：' + (schedule.enabled
+        ? (mode === 'hourly'
+            ? '每小时（第 ' + t[2] + ' 分）' + (body.shutdownAfter ? '（每小时模式不支持自动关机，已忽略）' : '')
+            : ('每天 ' + schedule.time + (schedule.shutdownAfter ? '，同步后自动关机' : '')))
+        : '已停用'));
+      sendJson(res, { ok: true, schedule: { enabled: schedule.enabled, mode: schedule.mode, time: schedule.time, shutdownAfter: schedule.shutdownAfter, lastFiredDate: schedule.lastFiredDate } });
       return;
     }
     if (req.method === 'POST' && p === '/api/cancel_shutdown') { sendJson(res, cancelShutdown()); return; }

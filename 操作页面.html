@@ -82,14 +82,21 @@
       <span class="help" id="schedState">读取中…</span>
     </div>
     <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-top:12px">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="schEnabled"> 每天定时运行</label>
-      <label style="display:flex;align-items:center;gap:6px">时间 <input type="time" id="schTime" value="23:00" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px"></label>
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="schShutdown"> 同步完成后自动关机</label>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="schEnabled"> 启用定时同步</label>
+      <label style="display:flex;align-items:center;gap:6px">频率
+        <select id="schMode" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;background:#fff">
+          <option value="daily">每天一次</option>
+          <option value="hourly">每小时一次</option>
+        </select>
+      </label>
+      <label id="schTimeWrap" style="display:flex;align-items:center;gap:6px">时间 <input type="time" id="schTime" value="23:00" style="padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px"></label>
+      <label id="schMinuteWrap" style="display:none;align-items:center;gap:6px">每时 <input type="number" id="schMinute" min="0" max="59" step="1" value="0" style="width:64px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px"> 分</label>
+      <label id="schShutdownWrap" style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="schShutdown"> 同步完成后自动关机</label>
       <button class="btn2" id="btnSaveSched">保存设置</button>
     </div>
     <div class="help" style="margin-top:10px">
       到点自动执行「会员详情增量 + 全部订单抓取」，完成后自动刷新查询页数据；若洗衣管家未开启或未开调试端口，会自动以调试模式重启软件。
-      勾选自动关机后：每次同步完成（手动点「开始」或定时触发均可）约 2 分钟自动关机（期间页面顶部出现红色提示条，可点击取消）。建议把定时设在打烊后（如 23:00），避免影响营业。
+      <span id="schModeHelp"></span>
     </div>
   </div>
 
@@ -106,7 +113,7 @@
       <li>抓取期间请保持洗衣管家开启并已登录；本页面可以关闭，服务在后台继续运行（地址 <code>http://127.0.0.1:8791</code>）。</li>
       <li>全部完成后：双击「打开会员查询页面.cmd」即可在查询台中查看所有会员的完整订单。</li>
       <li>若提示调试端口不可用：请完全退出洗衣管家，双击工具目录里的「以调试模式启动洗衣管家.cmd」后再开始。</li>
-      <li><strong>定时同步</strong>：在上方设置每天自动抓取的时间，可勾选「同步完成后自动关机」实现夜间全自动（抓取→刷新查询页→关机）。</li>
+      <li><strong>定时同步</strong>：在上方选择频率（每天一次或每小时一次）并保存，到点自动执行「会员详情增量 + 订单抓取」并刷新查询页；每小时模式若上次没跑完会自动补上本次。每天模式可勾选「同步完成后自动关机」实现夜间全自动（抓取→刷新查询页→关机）；每小时模式不支持自动关机。</li>
       <li><strong>自动清理</strong>：每次抓取完成或服务启动时，自动把导出/抓取文件<strong>保留最近 2 次</strong>，更早的移入回收站（可找回）；被占用的文件会自动跳过。</li>
     </ul>
   </div>
@@ -175,7 +182,14 @@
     chips.push(st.cdp === 'ok' ? '<span class="chip">调试端口 <b>正常</b></span>' : '<span class="chip bad">调试端口不可用 — 需以调试模式重启洗衣管家</span>');
     if (st.compare) chips.push('<span class="chip">比对：无需更新 <b>' + st.compare.skip + '</b> · 需抓取 <b>' + st.compare.fetch + '</b></span>');
     if (s.exportStamp) chips.push('<span class="chip">数据时间：' + s.exportStamp + '</span>');
-    if (st.schedule && st.schedule.enabled) chips.push('<span class="chip">定时同步 <b>每天 ' + st.schedule.time + '</b>' + (st.schedule.shutdownAfter ? ' · 同步后关机' : '') + '</span>');
+    if (st.schedule && st.schedule.enabled) {
+      var sch = st.schedule;
+      var schMM = /:(\d{2})$/.exec(sch.time || '00:00');
+      var schTxt = sch.mode === 'hourly'
+        ? '每小时（第 ' + (schMM ? schMM[1] : '00') + ' 分）'
+        : '每天 ' + sch.time;
+      chips.push('<span class="chip">定时同步 <b>' + schTxt + '</b>' + (sch.shutdownAfter ? ' · 同步后关机' : '') + '</span>');
+    }
     else chips.push('<span class="chip">定时同步 <b>未启用</b></span>');
     if (st.lastCleanup) chips.push('<span class="chip">自动清理 <b>移除 ' + st.lastCleanup.removed + ' 个</b> · ' + (st.lastCleanup.atText || '') + '</span>');
     $('#chips').innerHTML = chips.join('');
@@ -247,26 +261,57 @@
   $('#btnFolder').addEventListener('click', function(){ api('/api/open', 'POST', { what: 'folder' }); });
 
   // 定时同步设置
-  function schedStateText(s){
-    $('#schedState').textContent = s.enabled ? ('已启用：每天 ' + s.time + (s.shutdownAfter ? ' · 同步后自动关机' : '')) : '未启用';
+  function schedDesc(s){
+    if (!s.enabled) return '未启用';
+    if (s.mode === 'hourly') {
+      var mmh = /:(\d{2})$/.exec(s.time || '00:00');
+      return '已启用：每小时（第 ' + (mmh ? mmh[1] : '00') + ' 分）';
+    }
+    return '已启用：每天 ' + s.time + (s.shutdownAfter ? ' · 同步后自动关机' : '');
+  }
+  function schedStateText(s){ $('#schedState').textContent = schedDesc(s); }
+  function schedModeHelp(){
+    var hourly = $('#schMode').value === 'hourly';
+    $('#schTimeWrap').style.display = hourly ? 'none' : '';
+    $('#schMinuteWrap').style.display = hourly ? '' : 'none';
+    $('#schShutdown').disabled = hourly;
+    $('#schShutdownWrap').style.opacity = hourly ? '0.45' : '1';
+    $('#schModeHelp').textContent = hourly
+      ? '每小时模式：每到整点第 ' + ($('#schMinute').value || '0') + ' 分自动同步一次；若上次同步还没跑完，跑完后会自动补上本小时这一次（跨小时则顺延到下一个整点）。每小时模式不支持「同步后自动关机」（每小时都关机会打断同步循环）。营业时段也会执行，属增量抓取、请求量很小。'
+      : '勾选「同步完成后自动关机」：每次同步完成（手动点「开始」或定时触发均可）约 2 分钟自动关机（期间页面顶部出现红色提示条，可点击取消）。建议把定时设在打烊后（如 23:00），避免影响营业。';
   }
   function loadSched(){
     api('/api/schedule').then(function(r){
       var s = r.j && r.j.schedule; if (!s) return;
       $('#schEnabled').checked = !!s.enabled;
+      $('#schMode').value = s.mode === 'hourly' ? 'hourly' : 'daily';
       $('#schTime').value = s.time || '23:00';
+      var mm = /:(\d{2})$/.exec(s.time || '');
+      $('#schMinute').value = mm ? String(+mm[1]) : '0';
       $('#schShutdown').checked = !!s.shutdownAfter;
+      schedModeHelp();
       schedStateText(s);
     }).catch(function(){ $('#schedState').textContent = '读取失败'; });
   }
+  $('#schMode').addEventListener('change', schedModeHelp);
+  $('#schMinute').addEventListener('input', schedModeHelp);
   $('#btnSaveSched').addEventListener('click', function(){
-    var body = { enabled: $('#schEnabled').checked, time: $('#schTime').value || '23:00', shutdownAfter: $('#schShutdown').checked };
+    var hourly = $('#schMode').value === 'hourly';
+    var minute = Math.max(0, Math.min(59, parseInt($('#schMinute').value || '0', 10) || 0));
+    var body = hourly
+      ? { enabled: $('#schEnabled').checked, mode: 'hourly', time: '00:' + String(minute).padStart(2, '0'), shutdownAfter: false }
+      : { enabled: $('#schEnabled').checked, mode: 'daily', time: $('#schTime').value || '23:00', shutdownAfter: $('#schShutdown').checked };
     var b = this; b.disabled = true;
     api('/api/schedule', 'POST', body).then(function(r){
       b.disabled = false;
       if (r.j && r.j.error) { toast(r.j.error); return; }
-      if (r.j && r.j.schedule) schedStateText(r.j.schedule);
-      toast(body.enabled ? '已保存：每天 ' + r.j.schedule.time + (r.j.schedule.shutdownAfter ? '，同步后自动关机' : '') : '定时同步已停用');
+      if (r.j && r.j.schedule) { schedModeHelp(); schedStateText(r.j.schedule); }
+      var s = r.j && r.j.schedule;
+      toast(s && s.enabled
+        ? (s.mode === 'hourly'
+            ? '已保存：每小时（第 ' + (/:(\d{2})$/.exec(s.time || '00:00') || [null, '00'])[1] + ' 分）'
+            : '已保存：每天 ' + s.time + (s.shutdownAfter ? '，同步后自动关机' : ''))
+        : '定时同步已停用');
       poll();
     }).catch(function(){ b.disabled = false; toast('保存失败'); });
   });
