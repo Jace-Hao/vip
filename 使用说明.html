@@ -42,7 +42,7 @@
   <header>
     <h1>洗衣管家 · 会员数据导出工具</h1>
     <p class="sub">把会员数据一键导出为 Excel：常规表 / 全量字段 / 完整详情</p>
-    <span class="badge">v1.5 · 2026-09-24 · 洗衣管家 6.1.23 实测通过</span>
+    <span class="badge">v1.12 · 2026-10-18 · 洗衣管家 6.1.23 实测通过</span>
   </header>
 
   <section class="card">
@@ -54,8 +54,8 @@
     <h2>两个使用入口</h2>
     <table>
       <tr><th>入口</th><th>用时</th><th>导出内容</th></tr>
-      <tr><td><code>导出会员数据.cmd</code>（日常推荐）</td><td>几秒钟</td><td>常规表（9 列）+ <strong>全量字段表</strong>（会员档案全部字段，62 列）</td></tr>
-      <tr><td><code>导出会员数据(含详情).cmd</code>（完整版）</td><td>几分钟</td><td>上面全部 + 逐会员<strong>详情</strong>：标签、充值/赠送余额、卡券、<strong>订单明细</strong>、最近充值信息；<strong>增量更新</strong>（只重取新增/变更会员）；支持断点续传</td></tr>
+      <tr><td><code>导出会员数据.cmd</code>（日常推荐）</td><td>几秒钟</td><td><strong>所有会员</strong>的常规表（9 列）+ <strong>全量字段表</strong>（会员档案全部字段，62 列）</td></tr>
+      <tr><td><code>导出会员数据(含详情).cmd</code>（完整版）</td><td>首次全量约 1~2 小时；日常增量几分钟</td><td>上面全部 + 逐会员<strong>详情</strong>：标签、充值/赠送余额、卡券、<strong>订单明细</strong>、最近充值信息；<strong>增量更新</strong>（只重取新增/变更会员）；支持断点续传；<strong>全程不停顿</strong>（仅请求间自动限速约 2~3 秒/会员，失败仅短暂延时重试）</td></tr>
     </table>
   </section>
 
@@ -131,7 +131,11 @@
     </details>
     <details>
       <summary>含详情模式中途断了怎么办？</summary>
-      <p>重新运行同一个入口即可：会自动跳过已抓取成功的会员、继续补抓（断点续传）。若遇到取数失败，程序会<strong>自动等待 180 秒后重试</strong>，无需人工干预；只有连续 30 分钟完全没有进展时才会自动停止（数据均已保存，重跑可继续）。</p>
+      <p>重新运行同一个入口即可：会自动跳过已抓取成功的会员、继续补抓（断点续传）。导出<strong>全程不停顿</strong>：相邻请求自动保持约 2~3 秒间隔；遇到取数失败仅短暂延时（数秒~数十秒）后自动重试，无需人工干预；只有连续 30 分钟完全没有进展时才会自动停止（数据均已保存，重跑可继续）。</p>
+    </details>
+    <details>
+      <summary>导出的会员范围是什么？能只导某一级别吗？</summary>
+      <p>默认导出<strong>所有会员</strong>（含各级别）。如只想导出某一组别（如仅 VIP会员），运行前设置环境变量即可：<code>set LAUNDRY_VIP_GROUP=VIP会员</code>（对含详情导出、订单抓取同样生效；不设置则不过滤）。</p>
     </details>
     <details>
       <summary>数据是最新的吗？会不会影响洗衣管家使用？</summary>

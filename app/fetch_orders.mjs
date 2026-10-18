@@ -208,7 +208,7 @@ function loadMembersFromExport() {
   for (const r of (j.fullRows || [])) {
     const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
     if (o.uid == null) continue;
-    /* 与导出口径一致：仅保留目标组别（VIP会员），非目标组别不纳入订单抓取范围 */
+    /* 与导出口径一致：默认纳入所有会员；如需仅抓取某一组别，设置 LAUNDRY_VIP_GROUP=XXX */
     if (!isTargetGroup(o)) continue;
     list.push(o);
   }

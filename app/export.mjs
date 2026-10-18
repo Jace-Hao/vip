@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 /* ============================================================
- * 洗衣管家 · 会员数据导出工具（export.mjs）v1.1
+ * 洗衣管家 · 会员数据导出工具（export.mjs）v1.12
  * ------------------------------------------------------------
  * 功能：
  *   1) 常规导出：联系人/电话/级别/余额等 9 列汇总（csv/json/xlsx）
  *   2) 全量字段：会员列表接口返回的【全部字段】（csv/xlsx，含在 json 里）
  *   3) 深度详情（--deep）：逐会员抓取详情（标签、券、卡、订单、充值等）；
  *      增量比对：仅抓取新增/有变更的会员（--deep-full 可强制全量）；
- *      支持断点续传；统一限速（最小间隔+抖动+小时预算）；失败按指数退避等待重试；
+ *      支持断点续传；
+ *      【全程不停顿】相邻请求由统一限速器保持间隔（最小间隔+随机抖动），
+ *      这是唯一的节奏控制；取数失败仅短暂延时（数秒~数十秒）后重试，
+ *      不再做分钟级长休息/长退避。
+ *
+ * 会员范围：默认导出【所有会员】。
+ *   如需仅同步某一组别（如 VIP会员），设置环境变量即可（对详情/订单抓取同时生效）：
+ *     set LAUNDRY_VIP_GROUP=VIP会员
  *
  * 原理：洗衣管家是内嵌浏览器(CefSharp)的桌面程序，运行在 127.0.0.1:9222
  *       调试端口上。本工具在该端口内调用软件自身的接口读取数据。
@@ -41,17 +48,20 @@ const CDP_BASE = 'http://127.0.0.1:9222';
 const STATUS_MAP = { 0: '正常', 1: '禁用' };
 
 /* ---------------- 限速配置（防止触发服务端风控被踢下线） ---------------- */
-/* 默认值按「安全优先」设定：约 1962 个会员的详情阶段约需 5~7 小时，
-   配合断点续传可在夜间跑完；如需更快/更慢，用上面的参数覆盖即可。 */
+/* 默认「全程不停顿」：相邻请求最小间隔 + 随机抖动是唯一的节奏控制，
+   不做分钟级长休息；取数失败仅短暂延时（FAIL_BASE_SEC 起，指数退避至 FAIL_MAX_SEC）后重试。
+   约 2000 个会员的详情阶段约需 1.5~2 小时；如需更慢，用参数/环境变量覆盖即可。 */
 const MIN_INTERVAL_MS = pickNum({ argv: ARGV, arg: 'min-interval', env: 'LAUNDRY_MIN_INTERVAL_MS', def: 2200 });
 const JITTER_MS = pickNum({ argv: ARGV, arg: 'jitter', env: 'LAUNDRY_JITTER_MS', def: 1000 });
-/* 每实际抓取 REST_EVERY 个会员后长休息，休息时长随连续失败指数退避（REST_BASE_SEC → REST_MAX_SEC） */
-const REST_EVERY = pickNum({ argv: ARGV, arg: 'rest-every', env: 'LAUNDRY_REST_EVERY', def: 60 });
+/* 每实际抓取 REST_EVERY 个会员后长休息一次；默认 0 = 关闭长休息（全程不停顿）。
+   如确需长休息（例如怀疑已被限速），用 --rest-every=60 --rest-sec=90 显式开启。 */
+const REST_EVERY = pickNum({ argv: ARGV, arg: 'rest-every', env: 'LAUNDRY_REST_EVERY', def: 0 });
 const REST_BASE_SEC = pickNum({ argv: ARGV, arg: 'rest-sec', env: 'LAUNDRY_REST_SEC', def: 90 });
 const REST_MAX_SEC = pickNum({ argv: ARGV, arg: 'rest-max', env: 'LAUNDRY_REST_MAX', def: 900 });
-/* 单批失败后的等待：60 → 120 → 240 … 秒（指数退避，上限 FAIL_MAX_SEC） */
-const FAIL_BASE_SEC = pickNum({ argv: ARGV, arg: 'fail-sec', env: 'LAUNDRY_FAIL_SEC', def: 60 });
-const FAIL_MAX_SEC = pickNum({ argv: ARGV, arg: 'fail-max', env: 'LAUNDRY_FAIL_MAX', def: 600 });
+/* 单批失败后的短暂等待：5 → 10 → 20 … 秒（指数退避，上限 FAIL_MAX_SEC）。
+   只是操作间的短暂延时，不做分钟级停顿；如需更保守可调大（--fail-sec=60）。 */
+const FAIL_BASE_SEC = pickNum({ argv: ARGV, arg: 'fail-sec', env: 'LAUNDRY_FAIL_SEC', def: 5 });
+const FAIL_MAX_SEC = pickNum({ argv: ARGV, arg: 'fail-max', env: 'LAUNDRY_FAIL_MAX', def: 60 });
 /* 深度抓取批次大小：固定为 1，使 Node 侧能对每个会员精确限速（页内脚本连发无法限速） */
 const DEEP_BATCH = 1;
 
@@ -102,7 +112,8 @@ function appendJsonlSync(filePath, content) {
   try { const fd = fs.openSync(filePath, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); } catch (e) { /* fsync 失败不阻塞，仅影响极端场景下的断点续传 */ }
 }
 
-/* 失败时的长等待：等待指定秒数后再继续（等待期间每 60 秒提示一次，便于确认程序在运行） */
+/* 失败时的短暂等待：等待指定秒数后再继续（默认仅数秒~数十秒，保证全程不停顿；
+   等待期间每 10 秒提示一次，便于确认程序在运行） */
 async function waitLong(seconds, reason) {
   log(`      [提示] ${reason}；等待 ${seconds} 秒后自动继续...`);
   const step = 10;
@@ -336,7 +347,7 @@ async function fetchPageWithRetry(start, size) {
         log(`    取数失败（${e.message}），${attempt}/5，快速重试中...`);
         await sleep(1500 * attempt);
       } else {
-        /* 指数退避（与其它失败分支完全同口径）：60 → 120 → 240 秒，上限 FAIL_MAX_SEC */
+        /* 指数退避（与其它失败分支完全同口径）：5 → 10 → 20 秒，上限 FAIL_MAX_SEC */
         const waitSec = backoffSeconds(attempt, FAIL_BASE_SEC, FAIL_MAX_SEC);
         await waitLong(waitSec, `第 ${attempt} 次取数失败（${e.message}），退避 ${waitSec} 秒`);
       }
@@ -410,7 +421,7 @@ async function main() {
   const members = [];
   const seen = new Set();
   let dupCount = 0;
-  let excludedCount = 0; /* 非目标组别（非「${TARGET_GROUP}」）被采集层排除的数量 */
+  let excludedCount = 0; /* 非目标组别被采集层排除的数量（仅当设置了 LAUNDRY_VIP_GROUP 时才会发生） */
   let total = null;
   let start = 0;
   let pageNo = 0;
@@ -427,11 +438,11 @@ async function main() {
       const key = it.uid != null ? String(it.uid) : JSON.stringify(it);
       if (seen.has(key)) { dupCount++; continue; }
       seen.add(key);
-      /* 采集层组别过滤：非目标组别在采集阶段即排除，不进入后续导出/同步 */
+      /* 采集层组别过滤：仅当设置了目标组别时才排除非目标组别（默认不过滤，导出所有会员） */
       if (!isTargetGroup(it)) { excludedCount++; continue; }
       members.push(it);
     }
-    log(`        已筛入「${TARGET_GROUP}」${members.length}${total ? ' 条（接口返回共 ' + total + ' 条' : ''}，本页起累计排除非目标组别 ${excludedCount} 条）`);
+    log(`        已获取 ${members.length} 条${total ? '（接口返回共 ' + total + ' 条）' : ''}${TARGET_GROUP ? `，已筛入「${TARGET_GROUP}」` : '（全部会员）'}${excludedCount ? `，累计排除非目标组别 ${excludedCount} 条` : ''}`);
     if (list.length < PAGE_SIZE) break;
     start += PAGE_SIZE;
     pageNo++;
@@ -528,7 +539,7 @@ async function main() {
     stamp: ts,
   };
 
-  log(`      会员总数（目标组别「${TARGET_GROUP}」）：${members.length} 条${dupCount ? `（已去重 ${dupCount} 条）` : ''}${excludedCount ? `；本次共排除非目标组别 ${excludedCount} 条` : ''}`);
+  log(`      会员总数${TARGET_GROUP ? `（目标组别「${TARGET_GROUP}」）` : '（全部会员）'}：${members.length} 条${dupCount ? `（已去重 ${dupCount} 条）` : ''}${excludedCount ? `；本次共排除非目标组别 ${excludedCount} 条` : ''}`);
   log(`      账户余额合计：¥${sumYuan}`);
 
   /* ---- 深度详情（可选） ---- */
@@ -629,7 +640,7 @@ async function main() {
     let stopAll = false;
     let restSec = REST_BASE_SEC;   /* 长休息时长，连续失败时指数退避，成功后回落 */
     let consecFail = 0;
-    log(`      限速设置：最小间隔 ${MIN_INTERVAL_MS}ms + 抖动 0~${JITTER_MS}ms`);
+    log(`      限速设置：相邻请求最小间隔 ${MIN_INTERVAL_MS}ms + 抖动 0~${JITTER_MS}ms（全程不停顿，仅按请求限速${REST_EVERY > 0 ? `；每 ${REST_EVERY} 人长休息 ${REST_BASE_SEC}s` : ''}）`);
     log(`      初始状态：${limiter.usage()}`);
     for (let i = 0; i < remaining.length; i += BATCH) {
       /* 登录状态自检：若被软件登出立即停止（避免无效重试） */
@@ -664,9 +675,9 @@ async function main() {
               appends.push(JSON.stringify({ uid: item.uid, detail: item.detail }));
               done++;
               appended++;
-              /* 抓取间歇：每实际抓取 REST_EVERY 个会员长休息一次，降低被限速风险 */
+              /* 抓取间歇：仅当显式配置 REST_EVERY>0 时才每 N 人长休息一次（默认关闭，全程不停顿） */
               fetchedSinceRest++;
-              if (fetchedSinceRest >= REST_EVERY) {
+              if (REST_EVERY > 0 && fetchedSinceRest >= REST_EVERY) {
                 fetchedSinceRest = 0;
                 await waitLong(restSec, `已连续抓取 ${REST_EVERY} 个会员，休息 ${restSec} 秒（${limiter.usage()}）`);
               }
